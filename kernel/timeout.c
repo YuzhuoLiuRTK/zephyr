@@ -337,3 +337,17 @@ void z_vrfy_sys_clock_tick_set(uint64_t tick)
 	z_impl_sys_clock_tick_set(tick);
 }
 #endif
+
+struct _timeout *get_first_timeout(void)
+{
+    sys_dnode_t *t = sys_dlist_peek_head(&timeout_list);
+
+    return t == NULL ? NULL : CONTAINER_OF(t, struct _timeout, node);
+}
+
+struct _timeout *get_next_timeout(struct _timeout *t)
+{
+    sys_dnode_t *n = sys_dlist_peek_next(&timeout_list, &t->node);
+
+    return n == NULL ? NULL : CONTAINER_OF(n, struct _timeout, node);
+}
