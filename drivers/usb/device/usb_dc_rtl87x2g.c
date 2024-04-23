@@ -27,6 +27,10 @@
 
 #include "usb_dc_rtl87x2g.h"
 
+#ifdef CONFIG_PM
+#include "power_manager_unit_platform.h"
+#endif
+
 #include "trace.h"
 
 #include <zephyr/logging/log.h>
@@ -114,6 +118,7 @@ struct usb_dw_ctrl_prv
     uint8_t *ep_rx_buf[USB_DW_OUT_EP_NUM];
 #endif
     usb_dc_status_callback status_cb;
+    enum usb_dc_status_code current_status;
     struct usb_ep_ctrl_prv in_ep_ctrl[USB_DW_IN_EP_NUM];
     struct usb_ep_ctrl_prv out_ep_ctrl[USB_DW_OUT_EP_NUM];
     uint8_t attached;
@@ -633,6 +638,7 @@ static void usb_dw_handle_reset(void)
 #if CONFIG_USB_DC_RTL87X2G_DMA
     struct usb_dw_reg *const base = usb_dw_cfg.base;
 
+    usb_dw_ctrl.current_status = USB_DC_RESET;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -646,6 +652,7 @@ static void usb_dw_handle_reset(void)
 #else
     struct usb_dw_reg *const base = usb_dw_cfg.base;
 
+    usb_dw_ctrl.current_status = USB_DC_RESET;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -1012,6 +1019,7 @@ void usb_dw_handle_enum_done(void)
     speed = (base->dsts & ~USB_DW_DSTS_ENUM_SPD_MASK) >>
             USB_DW_DSTS_ENUM_SPD_OFFSET;
 
+    usb_dw_ctrl.current_status = USB_DC_CONNECTED;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -1032,6 +1040,7 @@ void usb_dw_handle_enum_done(void)
     speed = (base->dsts & ~USB_DW_DSTS_ENUM_SPD_MASK) >>
             USB_DW_DSTS_ENUM_SPD_OFFSET;
 
+    usb_dw_ctrl.current_status = USB_DC_CONNECTED;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -1348,6 +1357,7 @@ static void usb_dw_isr_handler(const void *unused)
 
             usb_power_is_on = false;
 
+            usb_dw_ctrl.current_status = USB_DC_SUSPEND;
             if (usb_dw_ctrl.status_cb)
             {
                 usb_dw_ctrl.status_cb(USB_DC_SUSPEND, NULL);
@@ -1364,6 +1374,7 @@ static void usb_dw_isr_handler(const void *unused)
             /* Clear interrupt. */
             base->gintsts = USB_DW_GINTSTS_WK_UP_INT;
 
+            usb_dw_ctrl.current_status = USB_DC_RESUME;
             if (usb_dw_ctrl.status_cb)
             {
                 usb_dw_ctrl.status_cb(USB_DC_RESUME, NULL);
@@ -1417,12 +1428,17 @@ static void usb_dw_resume_isr_handler(const void *unused)
 
     usb_power_is_on = true;
 
+    usb_dw_ctrl.current_status = USB_DC_RESUME;
     if (usb_dw_ctrl.status_cb)
     {
         usb_dw_ctrl.status_cb(USB_DC_RESUME, NULL);
     }
     return ;
 }
+
+#if CONFIG_PM
+static void usb_register_dlps_cb(void);
+#endif
 
 int usb_dc_attach(void)
 {
@@ -1460,6 +1476,10 @@ int usb_dc_attach(void)
         return ret;
     }
 
+#if CONFIG_PM
+    usb_register_dlps_cb();
+#endif
+
     usb_dw_cfg.irq_enable_func(NULL);
 
     usb_dw_ctrl.attached = 1U;
@@ -1487,6 +1507,7 @@ int usb_dc_detach(void)
 
     usb_dw_ctrl.attached = 0U;
 
+    usb_dw_ctrl.current_status = USB_DC_DISCONNECTED;
     if (usb_dw_ctrl.status_cb)
     {
         usb_dw_ctrl.status_cb(USB_DC_DISCONNECTED, NULL);
@@ -2173,6 +2194,15 @@ int usb_dc_wakeup_request(void)
 
 static void usb_isr_suspend_enable(void)
 {
+#ifdef CONFIG_PM
+    AON_REG7X_SYS_TYPE reg7x;
+    reg7x.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG7X_SYS);
+    reg7x.usb_wakeup_sel = 1;
+    reg7x.USB_WKPOL = 0;
+    reg7x.USB_WKEN = 1;
+    HAL_WRITE32(SYSTEM_REG_BASE, AON_REG7X_SYS, reg7x.d32);
+#endif
+
     /* edge trigger */
     SoC_VENDOR->u_008.REG_LOW_PRI_INT_MODE |= BIT31;
 
@@ -2182,3 +2212,71 @@ static void usb_isr_suspend_enable(void)
     /* Note: must disable at disable flow */
     SoC_VENDOR->u_00C.REG_LOW_PRI_INT_EN |= BIT31;
 }
+
+
+#ifdef CONFIG_PM
+extern int hal_usb_wakeup_status_clear(void);
+extern int hal_usb_wakeup_status_get(void);
+extern void usb_set_pon_domain(void);
+extern void usb_dm_start_from_dlps(void);
+extern void usb_rtk_disable_power_seq(void);
+
+void usb_start_from_dlps(void)
+{
+    if (usb_rtk_resume_sequence() != 0)
+    {
+        usb_rtk_disable_power_seq();
+        return ;
+    }
+
+    usb_dw_cfg.irq_enable_func(NULL);
+
+    return ;
+}
+
+static PMCheckResult usb_pm_check(void)
+{
+    volatile enum usb_dc_status_code usb_state = usb_dw_ctrl.current_status;
+    if (usb_state == USB_DC_SUSPEND || usb_state == USB_DC_DISCONNECTED)
+    {
+        return PM_CHECK_PASS;
+    }
+    else
+    {
+        return PM_CHECK_FAIL;
+    }
+}
+
+static void usb_pm_store(void)
+{
+#if DBG_DIRECT_SHOW
+    DBG_DIRECT("======================usb_pm_store======================");
+#endif
+    hal_usb_wakeup_status_clear();
+    AON_REG8X_SYS_TYPE reg8x;
+    reg8x.d32 = AON_REG_READ(AON_REG8X_SYS);
+}
+
+static void usb_pm_restore(void)
+{
+#if DBG_DIRECT_SHOW
+    DBG_DIRECT("======================usb_pm_restore======================");
+#endif
+    if (hal_usb_wakeup_status_get() == 0)
+    {
+    }
+    else
+    {
+        usb_start_from_dlps();
+    }
+}
+
+static void usb_register_dlps_cb(void)
+{
+    usb_set_pon_domain();
+
+    platform_pm_register_callback_func_with_priority((void *)usb_pm_check, PLATFORM_PM_CHECK, 1);
+    platform_pm_register_callback_func_with_priority((void *)usb_pm_store, PLATFORM_PM_STORE, 1);
+    platform_pm_register_callback_func_with_priority((void *)usb_pm_restore, PLATFORM_PM_RESTORE, 1);
+}
+#endif
