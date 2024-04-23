@@ -27,13 +27,17 @@
 
 #include "usb_dc_rtl87x2g.h"
 
+#ifdef CONFIG_PM
+#include "power_manager_unit_platform.h"
+#endif
+
 #include "trace.h"
 
 #include <zephyr/logging/log.h>
 #define LOG_LEVEL CONFIG_USB_DRIVER_LOG_LEVEL
 LOG_MODULE_REGISTER(usb_rtl87x2g, 0);
 
-#define DBG_DIRECT_SHOW 0
+#define DBG_DIRECT_SHOW 1
 
 /* FIXME: The actual number of endpoints should be obtained from GHWCFG4. */
 enum usb_dw_in_ep_idx
@@ -113,6 +117,7 @@ struct usb_dw_ctrl_prv
     uint8 *ep_rx_buf[USB_DW_OUT_EP_NUM];
 #endif
     usb_dc_status_callback status_cb;
+    enum usb_dc_status_code current_status;
     struct usb_ep_ctrl_prv in_ep_ctrl[USB_DW_IN_EP_NUM];
     struct usb_ep_ctrl_prv out_ep_ctrl[USB_DW_OUT_EP_NUM];
     int n_tx_fifos;
@@ -670,6 +675,7 @@ static void usb_dw_handle_reset(void)
 {
 #if CONFIG_USB_DC_RTL87X2G_DMA
 
+    usb_dw_ctrl.current_status = USB_DC_RESET;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -682,6 +688,7 @@ static void usb_dw_handle_reset(void)
 #else
     struct usb_dw_reg *const base = usb_dw_cfg.base;
 
+    usb_dw_ctrl.current_status = USB_DC_RESET;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -1048,6 +1055,7 @@ void usb_dw_handle_enum_done(void)
     speed = (base->dsts & ~USB_DW_DSTS_ENUM_SPD_MASK) >>
             USB_DW_DSTS_ENUM_SPD_OFFSET;
 
+    usb_dw_ctrl.current_status = USB_DC_CONNECTED;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -1068,6 +1076,7 @@ void usb_dw_handle_enum_done(void)
     speed = (base->dsts & ~USB_DW_DSTS_ENUM_SPD_MASK) >>
             USB_DW_DSTS_ENUM_SPD_OFFSET;
 
+    usb_dw_ctrl.current_status = USB_DC_CONNECTED;
     /* Inform upper layers */
     if (usb_dw_ctrl.status_cb)
     {
@@ -1382,6 +1391,7 @@ static void usb_dw_isr_handler(const void *unused)
 
             hal_usb_suspend_enter();
 
+            usb_dw_ctrl.current_status = USB_DC_SUSPEND;
             if (usb_dw_ctrl.status_cb)
             {
                 usb_dw_ctrl.status_cb(USB_DC_SUSPEND, NULL);
@@ -1398,6 +1408,7 @@ static void usb_dw_isr_handler(const void *unused)
             /* Clear interrupt. */
             base->gintsts = USB_DW_GINTSTS_WK_UP_INT;
 
+            usb_dw_ctrl.current_status = USB_DC_RESUME;
             if (usb_dw_ctrl.status_cb)
             {
                 usb_dw_ctrl.status_cb(USB_DC_RESUME, NULL);
@@ -1449,12 +1460,17 @@ static void usb_dw_resume_isr_handler(const void *unused)
     /* prevent false alarm */
     usb_rtk_resume_sequence();
 
+    usb_dw_ctrl.current_status = USB_DC_RESUME;
     if (usb_dw_ctrl.status_cb)
     {
         usb_dw_ctrl.status_cb(USB_DC_RESUME, NULL);
     }
     return ;
 }
+
+#if CONFIG_PM
+static void usb_register_dlps_cb(void);
+#endif
 
 int usb_dc_attach(void)
 {
@@ -1484,6 +1500,10 @@ int usb_dc_attach(void)
         LOG_ERR("usb dw init fials");
         return ret;
     }
+
+#if CONFIG_PM
+    usb_register_dlps_cb();
+#endif
 
     usb_dw_cfg.irq_enable_func(NULL);
 
@@ -2184,6 +2204,15 @@ int usb_dc_wakeup_request(void)
 
 static void usb_isr_suspend_enable(void)
 {
+#ifdef CONFIG_PM
+    AON_REG7X_SYS_TYPE reg7x;
+    reg7x.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG7X_SYS);
+    reg7x.usb_wakeup_sel = 1;
+    reg7x.USB_WKPOL = 0;
+    reg7x.USB_WKEN = 1;
+    HAL_WRITE32(SYSTEM_REG_BASE, AON_REG7X_SYS, reg7x.d32);
+#endif
+
     /* edge trigger */
     SoC_VENDOR->u_008.REG_LOW_PRI_INT_MODE |= BIT31;
 
@@ -2193,3 +2222,324 @@ static void usb_isr_suspend_enable(void)
     /* Note: must disable at disable flow */
     SoC_VENDOR->u_00C.REG_LOW_PRI_INT_EN |= BIT31;
 }
+
+
+#ifdef CONFIG_PM
+extern int hal_usb_wakeup_status_clear(void);
+extern int hal_usb_wakeup_status_get(void);
+// extern void usb_start_from_dlps(void);
+extern void usb_set_pon_domain(void);
+extern void usb_dm_start_from_dlps(void);
+
+// void usb_start_from_dlps_patch(void)
+// {
+//     // resume from system DLPS state
+//     int result = -1;
+
+//     // if (enable_usb_power_seq() != 0)
+//     // {
+//     //     disable_usb_power_seq();
+//     //     return ;
+//     // }
+//     hal_usb_phy_power_on();
+
+//     usb_isr_suspend_enable();
+
+// #if 1
+//     // extern int dwc_otg_driver_probe_dlps(void);
+//     // result = dwc_otg_driver_probe_dlps();
+//     // if (result != 0)
+//     // {
+//     //     return ;
+//     // }
+// #endif
+
+//     return ;
+// }
+
+// int enable_usb_power_seq(void)
+// {
+//     uint32_t UsbOtgTemp = 0;
+//     ActiveSrc_InitType pll2_config =
+//     {
+//         .src_sel = CKO1_PLL2_SRC,
+//         .src_output_Hz = CLOCK_160MHZ,
+//         .src_enable = true,
+//     };
+
+//     // 0x40000C14[8] = 1
+//     AON_REG2X_LDO_TYPE reg2x;
+//     reg2x.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG2X_LDO);// 0x40000C14
+//     reg2x.LDO_PCUT_VAONVDIGUSB = 1;
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG2X_LDO, reg2x.d32);
+//     // 0x40000c14 = 0x7524f520
+
+//     // 0x40000D40[28][27][26][25] = 1
+//     AON_REG_USB_POWER_CTL_TYPE usb_pwctrl;
+//     usb_pwctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL);// 0x40000D40
+//     usb_pwctrl.USB_POW_BG = 1;//28
+//     usb_pwctrl.UD11PC_EN = 1;//27
+//     usb_pwctrl.UA11PC_EN = 1;//26
+//     usb_pwctrl.UA33PC_EN = 1;//25
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL, usb_pwctrl.d32);
+
+//     platform_delay_ms(2);
+//     // 0x40000D40[31][30] = 0
+//     usb_pwctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL);// 0x40000D40
+//     usb_pwctrl.ISO_LV = 0;//30
+//     usb_pwctrl.ISO_UA2USB = 0;//31
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL, usb_pwctrl.d32);
+
+//     // enable usb function & clockreg from AON
+//     // 0x40000d40 = 1e000000
+
+//     platform_delay_us(50);
+
+//     /* enable usb function */
+
+//     // 0x40000800 [11] = 1
+//     AON_REG0X_SYS_TYPE aon_reg0;// 0x800
+//     aon_reg0.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG0X_SYS);
+//     aon_reg0.BT_CORE3_RSTB = 1;// 11
+//     aon_reg0.ISO_BT_CORE3 = 0;// fpga use bit12
+//     aon_reg0.ISO_EF2AON = 1;//14
+//     aon_reg0.ISO_USB_VON = 0;//15
+//     aon_reg0.ISO_AFE_PLL2 = 0;// 17
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG0X_SYS, aon_reg0.d32);// bt_cores_rstb,
+//     // 0x40000800 = 0x2f587
+
+
+// //#define FORCE_USE_XTAL
+// #ifdef FORCE_USE_XTAL
+//     aon_reg0.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG0X_SYS);
+//     aon_reg0.ISO_DIG_40M = 0;// fpga use bit11?
+//     //aon_reg0.ISO_AFE_PLL2 = 0;
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG0X_SYS, aon_reg0.d32);// bt_cores_rstb,
+// #else
+
+//     pf_set_active_clock_src_output(pll2_config);////
+// #endif
+
+
+//     AON_REG_USB_CLK_CTL_TYPE reg_usb_ctrl;// 0xD44
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.usb_ck_en = 1;// 28
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.usb_func_en = 1;// 27
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+// #ifdef FORCE_USE_XTAL
+//     reg_usb_ctrl.r_usb_clk_src_sel0 = 0;// [8], 1 sel pll2, 0 sel xtal
+// #else
+//     reg_usb_ctrl.r_usb_clk_src_sel0 = 1;// [8], 1 sel pll2, 0 sel xtal
+// #endif
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.r_usb_clk_src_sel1 = 1;//7
+//     reg_usb_ctrl.r_usb_div_sel = 1;// 0x1 : *(7/8), 0x04: *(1/2)
+//     reg_usb_ctrl.r_usb_div_en = 1;
+// #ifdef FORCE_USE_XTAL
+//     reg_usb_ctrl.r_usb_clk_src_sel1 = 0;//7
+//     reg_usb_ctrl.r_usb_div_en = 0;
+// #endif
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.r_usb_mux_clk_cg_en = 1;//6
+//     reg_usb_ctrl.r_usb_clk_src_en = 1;//0
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+//     // 0x40000d44 = 0x180001c1
+
+//     platform_delay_us(5);
+//     /* Wait 1us */
+//     platform_delay_us(10);
+
+//     /* USBPHY_EN = 1 */
+//     UsbOtgTemp = HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF);
+//     UsbOtgTemp |= BIT_USBPHY_EN(1);// bit9
+//     HAL_OTG_WRITE32(REG_OTG_PWCSEQ_IP_OFF, UsbOtgTemp);
+
+//     /* BIT_PORETB_TOP_EN = 1 */
+//     UsbOtgTemp = HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF);
+//     UsbOtgTemp |= BIT_PORETB_TOP_EN(1);// bit 11
+//     HAL_OTG_WRITE32(REG_OTG_PWCSEQ_IP_OFF, UsbOtgTemp);
+
+//     /* Wait UPLL_CKRDY */ /* BB3: USB PHY clock ready */
+//     uint16_t cnt = 0;
+//     while (!(HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF) & BIT_UPLL_CKRDY(1)))
+//     {
+//         cnt++;
+//         platform_delay_ms(1);
+//         if (cnt >= 1000)
+//         {
+//             disable_usb_power_seq();
+//             return -1;
+//         }
+//     };
+
+
+//     /* USBOTG_EN = 1 => enable USBOTG */ /* USB OTG Reset */
+//     UsbOtgTemp = HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF);
+//     UsbOtgTemp |= BIT_USBOTG_EN(1);
+//     HAL_OTG_WRITE32(REG_OTG_PWCSEQ_IP_OFF, UsbOtgTemp);
+
+//     return 0; // success
+
+// }
+// void disable_usb_power_seq(void)
+// {
+//     uint32_t UsbOtgTemp = 0;
+
+//     /* USBOTG_EN = 0 => enable USBOTG */ /* USB OTG Reset */
+//     UsbOtgTemp = HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF);
+//     UsbOtgTemp &= ~(BIT_USBOTG_EN(1));//[8]
+//     HAL_OTG_WRITE32(REG_OTG_PWCSEQ_IP_OFF, UsbOtgTemp);
+
+//     /* BIT_PORETB_TOP_EN = 0 */
+//     UsbOtgTemp = HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF);
+//     UsbOtgTemp &= ~(BIT_PORETB_TOP_EN(1));// UA33PC_EN, //[11]
+//     HAL_OTG_WRITE32(REG_OTG_PWCSEQ_IP_OFF, UsbOtgTemp);
+
+//     /* USBPHY_EN = 0 */
+//     UsbOtgTemp = HAL_OTG_READ32(REG_OTG_PWCSEQ_IP_OFF);
+//     UsbOtgTemp &= ~(BIT_USBPHY_EN(1));//[9]
+//     HAL_OTG_WRITE32(REG_OTG_PWCSEQ_IP_OFF, UsbOtgTemp);
+
+//     platform_delay_us(10);
+
+//     /* disable usb function */
+//     //HAL_WRITE32(SYSBLKCTRL_REG_BASE, 0x10, HAL_READ32(SYSBLKCTRL_REG_BASE, 0x10) & (~BIT15));
+//     AON_REG_USB_CLK_CTL_TYPE reg_usb_ctrl;// 0xD44
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.r_usb_mux_clk_cg_en = 0;//6
+//     reg_usb_ctrl.r_usb_clk_src_en = 0;//0
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.r_usb_clk_src_sel1 = 0;//7
+//     reg_usb_ctrl.r_usb_div_sel = 0;// 0x1 : *(7/8), 0x04: *(1/2)
+//     reg_usb_ctrl.r_usb_div_en = 0;
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.r_usb_clk_src_sel0 = 0;// [8], 1 sel pll2, 0 sel xtal
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.usb_func_en = 0;// 27
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+
+//     reg_usb_ctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL);
+//     reg_usb_ctrl.usb_ck_en = 0;// 28
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_CLK_CTL, reg_usb_ctrl.d32);
+
+
+//     AON_REG0X_SYS_TYPE aon_reg0;// 0x800
+//     aon_reg0.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG0X_SYS);
+//     aon_reg0.BT_CORE3_RSTB = 0;// 11
+//     aon_reg0.ISO_BT_CORE3 = 1;// fpga use bit12
+//     aon_reg0.ISO_EF2AON = 0;//14
+//     aon_reg0.ISO_USB_VON = 1;//15
+//     aon_reg0.ISO_AFE_PLL2 = 1;// 17
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG0X_SYS, aon_reg0.d32);// bt_cores_rstb,
+
+//     platform_delay_us(50);
+
+//     AON_REG_USB_POWER_CTL_TYPE usb_pwctrl;
+//     usb_pwctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL);// 0x40000D40
+//     usb_pwctrl.ISO_LV = 1;//30
+//     usb_pwctrl.ISO_UA2USB = 1;//31
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL, usb_pwctrl.d32);
+//     platform_delay_ms(2);
+//     usb_pwctrl.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL);// 0x40000D40
+//     usb_pwctrl.USB_POW_BG = 0;//28
+//     usb_pwctrl.UD11PC_EN = 0;//27
+//     usb_pwctrl.UA11PC_EN = 0;//26
+//     usb_pwctrl.UA33PC_EN = 0;//25
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG_USB_POWER_CTL, usb_pwctrl.d32);
+
+
+//     AON_REG2X_LDO_TYPE reg2x;
+//     reg2x.d32 = HAL_READ32(SYSTEM_REG_BASE, AON_REG2X_LDO);// 0x40000C14
+//     reg2x.LDO_PCUT_VAONVDIGUSB = 0;
+//     HAL_WRITE32(SYSTEM_REG_BASE, AON_REG2X_LDO, reg2x.d32);
+
+//     platform_delay_us(5);
+
+//     SYSBLKCTRL->u_230.BITS_230.BIT_SOC_ACTCK_USB_EN = 0;
+//     SYSBLKCTRL->u_230.BITS_230.BIT_SOC_SLPCK_USB_EN = 0;
+// }
+
+void usb_start_from_dlps(void)
+{
+    // resume from system DLPS state
+    int result = -1;
+
+    if (usb_rtk_resume_sequence() != 0)// TODO: fail? why
+    {
+        DBG_DIRECT("[usb_start_from_dlps] line%d", __LINE__);
+        // disable_usb_power_seq();
+        return ;
+    }
+
+    usb_dw_cfg.irq_enable_func(NULL);
+
+    // usb_register_system_resource_by_project();
+
+    // usb_info.usb_power_state = USB_RTK_PWRON_SEQ_DONE;
+
+    // extern int dwc_otg_driver_probe_dlps(void);
+    // result = dwc_otg_driver_probe_dlps();
+    // if (result != 0)
+    // {
+    //     return ;
+    // }
+
+    // usb_info.usb_power_state = USB_ACTIVE;
+    return ;
+}
+
+static PMCheckResult usb_pm_check(void)
+{
+    volatile enum usb_dc_status_code usb_state = usb_dw_ctrl.current_status;
+    DBG_DIRECT("usb_pm_check usb_state %d", usb_state);
+    if (usb_state == USB_DC_SUSPEND || usb_state == USB_DC_DISCONNECTED)
+    {
+        return PM_CHECK_PASS;
+    }
+    return PM_CHECK_FAIL;
+}
+
+static void usb_pm_store(void)
+{
+    DBG_DIRECT("usb_pm_store");
+    hal_usb_wakeup_status_clear();
+    AON_REG8X_SYS_TYPE reg8x;
+    reg8x.d32 = AON_REG_READ(AON_REG8X_SYS);
+    DBG_DIRECT("reg8x.d32 = %d", reg8x.usb_wkup_sts);
+}
+
+static void usb_pm_restore(void)
+{
+    // if (hal_usb_wakeup_status_get() == 0)
+    // {
+    //     DBG_DIRECT("line%d", __LINE__);
+    // }
+    // else
+    // {
+    //     DBG_DIRECT("line%d", __LINE__);
+    //     usb_start_from_dlps();
+    // }
+        usb_start_from_dlps();
+    DBG_DIRECT("usb_pm_restore");
+}
+
+static void usb_register_dlps_cb(void)
+{
+    usb_set_pon_domain();
+
+    platform_pm_register_callback_func_with_priority((void *)usb_pm_check, PLATFORM_PM_CHECK, 1);
+    platform_pm_register_callback_func_with_priority((void *)usb_pm_store, PLATFORM_PM_STORE, 1);
+    platform_pm_register_callback_func_with_priority((void *)usb_pm_restore, PLATFORM_PM_RESTORE, 1);
+}
+#endif
