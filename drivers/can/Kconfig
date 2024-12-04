@@ -101,6 +101,7 @@ source "drivers/can/Kconfig.fake"
 source "drivers/can/Kconfig.nxp_s32"
 source "drivers/can/Kconfig.tcan4x5x"
 source "drivers/can/Kconfig.mcp251xfd"
+source "drivers/can/Kconfig.rtl87x2g"
 
 source "drivers/can/transceiver/Kconfig"
 
