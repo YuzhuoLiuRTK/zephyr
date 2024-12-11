@@ -959,7 +959,7 @@ static inline void usb_dw_int_iep_handler(void)
 #endif
 		base->in_ep_reg[ep_idx].diepint = ep_int_status;
 		ep_mps = usb_dw_ctrl.out_ep_ctrl[ep_idx].mps;
-		usb_dw_rx_dma(0, usb_dw_ctrl.ep_rx_buf[ep_idx], ep_mps);
+		usb_dw_rx_dma(ep_idx, usb_dw_ctrl.ep_rx_buf[ep_idx], ep_mps);
 
 		ep_cb = usb_dw_ctrl.in_ep_ctrl[ep_idx].cb;
 		if (ep_cb && (ep_int_status & USB_DW_DIEPINT_XFER_COMPL)) {
