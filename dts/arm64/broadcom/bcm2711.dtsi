@@ -156,5 +156,110 @@
 			clocks = <&clk_uart>;
 			status = "disabled";
 		};
+
+		i2c0: i2c@fe205000 {
+			compatible = "brcm,bcm2711-i2c";
+			reg = <0xfe205000 0x200>;
+			interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&clk_vpu>;
+			status = "disabled";
+		};
+
+		i2c1: i2c@fe804000 {
+			compatible = "brcm,bcm2711-i2c";
+			reg = <0xfe804000 0x200>;
+			interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&clk_vpu>;
+			status = "disabled";
+		};
+
+		i2c3: i2c@fe205600 {
+			compatible = "brcm,bcm2711-i2c";
+			reg = <0xfe205600 0x200>;
+			interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&clk_vpu>;
+			status = "disabled";
+		};
+
+		i2c4: i2c@fe205800 {
+			compatible = "brcm,bcm2711-i2c";
+			reg = <0xfe205800 0x200>;
+			interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&clk_vpu>;
+			status = "disabled";
+		};
+
+		i2c5: i2c@fe205a00 {
+			compatible = "brcm,bcm2711-i2c";
+			reg = <0xfe205a00 0x200>;
+			interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&clk_vpu>;
+			status = "disabled";
+		};
+
+		i2c6: i2c@fe205c00 {
+			compatible = "brcm,bcm2711-i2c";
+			reg = <0xfe205c00 0x200>;
+			interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&clk_vpu>;
+			status = "disabled";
+		};
+
+		usb0: usb@fe980000 {
+			compatible = "brcm,bcm2835-usb", "snps,dwc2";
+			reg = <0xfe980000 0x10000>;
+			interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			num-in-eps = <8>;
+			num-out-eps = <8>;
+			ghwcfg1 = <0x00000000>;
+			ghwcfg2 = <0x228ddd50>;
+			ghwcfg4 = <0x1ff00020>;
+			g-rx-fifo-size = <788>;
+			g-np-tx-fifo-size = <32>;
+			g-tx-fifo-size = <512 512 512 512 512 256 256>;
+			status = "disabled";
+		};
+	};
+
+	axi {
+		#address-cells = <2>;
+		#size-cells = <1>;
+
+		eth0: ethernet@fd580000 {
+			compatible = "brcm,genet";
+			reg = <0x0 0xfd580000 0x10000>;
+			interrupts = <GIC_SPI 158 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			status = "disabled";
+
+			mdio0: mdio@e14 {
+				compatible = "brcm,genet-mdio";
+				reg = <0xe14 0x8>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
+			};
+		};
 	};
 };
