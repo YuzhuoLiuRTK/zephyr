@@ -452,7 +452,7 @@ static int gpio_bee_pin_interrupt_configure(const struct device *port, gpio_pin_
 	GPIO_StructInit(&gpio_init_struct);
 
 	gpio_init_struct.GPIO_Pin = gpio_bit;
-	gpio_init_struct.GPIO_Mode = GPIO_Mode_IN;
+	gpio_init_struct.BEE_GPIO_DIR = BEE_GPIO_DIR_IN;
 	if (data->array[pin].pin_debounce_ms) {
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 		gpio_init_struct.GPIO_DebounceClkSource = GPIO_DEBOUNCE_32K;
