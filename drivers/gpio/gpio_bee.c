@@ -39,6 +39,16 @@
 #error "Unsupported Realtek Bee SoC series"
 #endif
 
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+#define BEE_GPIO_PM_WAKEUP_PPU 1
+#elif defined(CONFIG_PM_DEVICE)
+#define BEE_GPIO_PM_STORE 1
+#endif
+
+#if defined(BEE_GPIO_PM_STORE)
+#include <zephyr/pm/device.h>
+#endif
+
 #include <zephyr/drivers/gpio/gpio_utils.h>
 #include <zephyr/logging/log.h>
 
@@ -114,12 +124,12 @@ extern uint32_t GPIO_SwapDebPinBit(GPIO_TypeDef *GPIOx, uint32_t GPIO_Pin);
 #define GPIO_GET_INT_ENABLE(port, pin)                                                             \
 	(((GPIO_TypeDef *)(port))->INTEN & (uint32_t)(pin) ? true : false)
 #define GPIO_GET_TRIGGER_MODE(port, pin)                                                           \
-	((GPIO_TypeDef *)(port)->INTBOTHEDGE & (uint32_t)(pin) ? GPIO_INT_BOTH_EDGE                \
-	 : (GPIO_TypeDef *)(port)->INTTYPE & (uint32_t)(pin)   ? GPIO_INT_Trigger_EDGE             \
-							       : GPIO_INT_Trigger_LEVEL)
+	(((GPIO_TypeDef *)(port))->INTBOTHEDGE & (uint32_t)(pin) ? GPIO_INT_BOTH_EDGE              \
+	 : ((GPIO_TypeDef *)(port))->INTTYPE & (uint32_t)(pin)   ? GPIO_INT_Trigger_EDGE           \
+								 : GPIO_INT_Trigger_LEVEL)
 #define GPIO_GET_TRIGGER_POLARITY(port, pin)                                                       \
-	((GPIO_TypeDef *)(port)->INTPOLARITY & (uint32_t)(pin) ? GPIO_INT_POLARITY_ACTIVE_HIGH     \
-							       : GPIO_INT_POLARITY_ACTIVE_LOW)
+	(((GPIO_TypeDef *)(port))->INTPOLARITY & (uint32_t)(pin) ? GPIO_INT_POLARITY_ACTIVE_HIGH   \
+								 : GPIO_INT_POLARITY_ACTIVE_LOW)
 
 #define BEE_GPIO_DIR         GPIO_Mode
 #define BEE_GPIO_DEBOUNCE_EN GPIO_ITDebounce
@@ -184,10 +194,25 @@ extern uint32_t GPIO_SwapDebPinBit(GPIO_TypeDef *GPIOx, uint32_t GPIO_Pin);
 
 #endif
 
+#if defined(BEE_GPIO_PM_STORE)
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+typedef GPIOStoreReg_Typedef gpio_bee_store_reg_t;
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+typedef GPIOStoreReg_TypeDef gpio_bee_store_reg_t;
+#endif
+
+/* Not declared by the HAL headers */
+extern void GPIO_DLPSEnter(void *PeriReg, void *StoreBuf);
+extern void GPIO_DLPSExit(void *PeriReg, void *StoreBuf);
+#endif /* BEE_GPIO_PM_STORE */
+
 struct gpio_pad_node {
 	uint8_t pad_num;
 	uint8_t pin_debounce_ms;
 	bool both_edge;
+#if defined(BEE_GPIO_PM_STORE)
+	bool level_before_sleep;
+#endif
 };
 
 struct gpio_bee_irq_info {
@@ -212,6 +237,9 @@ struct gpio_bee_data {
 	sys_slist_t cb;
 	struct gpio_pad_node *array;
 	gpio_port_pins_t connect_pin;
+#if defined(BEE_GPIO_PM_STORE)
+	gpio_bee_store_reg_t store_buf;
+#endif
 };
 
 static uint32_t gpio_bee_get_pull_config(gpio_flags_t flags)
@@ -420,7 +448,7 @@ static int gpio_bee_pin_interrupt_configure(const struct device *port, gpio_pin_
 	if (mode == GPIO_INT_MODE_DISABLE_ONLY) {
 		BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, ENABLE);
 		BEE_GPIO_INT_CONFIG(port_base, gpio_bit, DISABLE);
-#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+#if defined(BEE_GPIO_PM_WAKEUP_PPU)
 		pinctrl_bee_wakeup_config(data->array[pin].pad_num, 0, PINCTRL_BEE_WAKEUP_PPU,
 					  false);
 #endif
@@ -428,7 +456,7 @@ static int gpio_bee_pin_interrupt_configure(const struct device *port, gpio_pin_
 	} else if (mode == GPIO_INT_MODE_ENABLE_ONLY) {
 		BEE_GPIO_INT_CONFIG(port_base, gpio_bit, ENABLE);
 		BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, DISABLE);
-#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+#if defined(BEE_GPIO_PM_WAKEUP_PPU)
 		pinctrl_bee_wakeup_config(data->array[pin].pad_num,
 					  BEE_GPIO_READ_INPUT_DATA_BIT(port_base, gpio_bit) ? 0 : 1,
 					  PINCTRL_BEE_WAKEUP_PPU, true);
@@ -440,7 +468,7 @@ static int gpio_bee_pin_interrupt_configure(const struct device *port, gpio_pin_
 	BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, ENABLE);
 	BEE_GPIO_INT_CONFIG(port_base, gpio_bit, DISABLE);
 
-#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+#if defined(BEE_GPIO_PM_WAKEUP_PPU)
 	if ((BEE_GPIO_READ_INPUT_DATA_BIT(port_base, gpio_bit) && trig == GPIO_INT_TRIG_HIGH) ||
 	    (!BEE_GPIO_READ_INPUT_DATA_BIT(port_base, gpio_bit) && trig == GPIO_INT_TRIG_LOW)) {
 		return -ENOTSUP;
@@ -506,7 +534,7 @@ static int gpio_bee_pin_interrupt_configure(const struct device *port, gpio_pin_
 	BEE_GPIO_INIT(port_base, &gpio_init_struct);
 	BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, ENABLE);
 	BEE_GPIO_INT_CONFIG(port_base, gpio_bit, ENABLE);
-#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+#if defined(BEE_GPIO_PM_WAKEUP_PPU)
 	pinctrl_bee_wakeup_config(data->array[pin].pad_num,
 				  BEE_GPIO_READ_INPUT_DATA_BIT(port_base, gpio_bit) ? 0 : 1,
 				  PINCTRL_BEE_WAKEUP_PPU, true);
@@ -579,7 +607,7 @@ static void gpio_bee_isr(void *arg)
 					      BEE_GPIO_READ_INPUT_DATA_BIT(port_base, BIT(i))
 						      ? BEE_GPIO_POLARITY_ACTIVE_LOW
 						      : BEE_GPIO_POLARITY_ACTIVE_HIGH);
-#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+#if defined(BEE_GPIO_PM_WAKEUP_PPU)
 			pinctrl_bee_wakeup_config(
 				data->array[i].pad_num,
 				BEE_GPIO_READ_INPUT_DATA_BIT(port_base, BIT(i)) ? 0 : 1,
@@ -592,6 +620,136 @@ static void gpio_bee_isr(void *arg)
 
 	BEE_GPIO_CLEAR_INT_PENDING_BIT(port_base, UINT32_MAX);
 }
+
+#if defined(BEE_GPIO_PM_STORE)
+/* A pin that is about to lose its power keeps its level through the pad, which
+ * has to be driven by hand for as long as the port registers are gone.
+ */
+static void gpio_bee_pm_suspend_pin(const struct device *port, gpio_pin_t pin)
+{
+	const struct gpio_bee_config *config = port->config;
+	struct gpio_bee_data *data = port->data;
+	GPIO_TypeDef *port_base = config->port_base;
+	uint32_t gpio_bit = BIT(pin);
+	uint8_t pad_num = data->array[pin].pad_num;
+
+	if (GPIO_GET_PORT_DIRECTION(port_base) & gpio_bit) {
+		BEE_Pad_SET_OUTPUT_LEVEL(pad_num,
+					 BEE_GPIO_READ_OUTPUT_DATA_BIT(port_base, gpio_bit)
+						 ? PAD_OUT_HIGH
+						 : PAD_OUT_LOW);
+	} else if (GPIO_GET_INT_ENABLE(port_base, gpio_bit)) {
+		bool high_trigger = GPIO_GET_TRIGGER_POLARITY(port_base, gpio_bit) ==
+				    BEE_GPIO_POLARITY_ACTIVE_HIGH;
+
+		/* An edge that arrives while the port is gone is only visible as
+		 * a level change, so remember the level to compare against.
+		 */
+		data->array[pin].level_before_sleep =
+			BEE_GPIO_READ_INPUT_DATA_BIT(port_base, gpio_bit);
+
+		/* The interrupt itself cannot reach the CPU, so the pad takes
+		 * over as the wakeup source at the polarity it triggers on.
+		 */
+		pinctrl_bee_wakeup_config(pad_num, high_trigger, PINCTRL_BEE_WAKEUP_SYS, true);
+	}
+
+	BEE_Pad_SET_CONTROL_MODE(pad_num, PAD_SW_MODE);
+}
+
+static void gpio_bee_pm_resume_pin(const struct device *port, gpio_pin_t pin)
+{
+	struct gpio_bee_data *data = port->data;
+	uint8_t pad_num = data->array[pin].pad_num;
+
+	pinctrl_bee_wakeup_config(pad_num, 0, PINCTRL_BEE_WAKEUP_SYS, false);
+	Pinmux_Config(pad_num, DWGPIO);
+	BEE_Pad_SET_CONTROL_MODE(pad_num, PAD_PINMUX_MODE);
+}
+
+/* An edge interrupt that arrived while the port was powered down left no
+ * pending bit behind, so report it from the level it left the pin at. A level
+ * interrupt needs none of this, it fires again on its own.
+ */
+static void gpio_bee_pm_replay_edge(const struct device *port, gpio_pin_t pin)
+{
+	const struct gpio_bee_config *config = port->config;
+	struct gpio_bee_data *data = port->data;
+	GPIO_TypeDef *port_base = config->port_base;
+	uint32_t gpio_bit = BIT(pin);
+	bool high_trigger;
+	bool level_now;
+
+	if (!GPIO_GET_INT_ENABLE(port_base, gpio_bit) ||
+	    GPIO_GET_TRIGGER_MODE(port_base, gpio_bit) != BEE_GPIO_TRIGGER_EDGE) {
+		return;
+	}
+
+	/* A debounced pin only settles some time from now, so leave it to the
+	 * interrupt the debounce logic raises once it does.
+	 */
+	if (data->array[pin].pin_debounce_ms) {
+		return;
+	}
+
+	high_trigger =
+		GPIO_GET_TRIGGER_POLARITY(port_base, gpio_bit) == BEE_GPIO_POLARITY_ACTIVE_HIGH;
+	level_now = BEE_GPIO_READ_INPUT_DATA_BIT(port_base, gpio_bit);
+
+	BEE_GPIO_CLEAR_INT_PENDING_BIT(port_base, gpio_bit);
+
+	if (level_now != data->array[pin].level_before_sleep && level_now == high_trigger) {
+		gpio_fire_callbacks(&data->cb, port, gpio_bit);
+	}
+}
+
+static int gpio_bee_pm_action(const struct device *port, enum pm_device_action action)
+{
+	const struct gpio_bee_config *config = port->config;
+	struct gpio_bee_data *data = port->data;
+	GPIO_TypeDef *port_base = config->port_base;
+	gpio_port_pins_t connect_pin;
+	unsigned int key;
+
+	key = irq_lock();
+	connect_pin = data->connect_pin;
+	irq_unlock(key);
+
+	switch (action) {
+	case PM_DEVICE_ACTION_SUSPEND:
+		/* Take the shadow copy the registers are restored from, with
+		 * every output level and trigger polarity as they stand now.
+		 */
+		GPIO_DLPSEnter(port_base, &data->store_buf);
+
+		for (uint8_t pin = 0; pin < 32; pin++) {
+			if (connect_pin & BIT(pin)) {
+				gpio_bee_pm_suspend_pin(port, pin);
+			}
+		}
+		break;
+	case PM_DEVICE_ACTION_RESUME:
+		for (uint8_t pin = 0; pin < 32; pin++) {
+			if (connect_pin & BIT(pin)) {
+				gpio_bee_pm_resume_pin(port, pin);
+			}
+		}
+
+		GPIO_DLPSExit(port_base, &data->store_buf);
+
+		for (uint8_t pin = 0; pin < 32; pin++) {
+			if (connect_pin & BIT(pin)) {
+				gpio_bee_pm_replay_edge(port, pin);
+			}
+		}
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+#endif /* BEE_GPIO_PM_STORE */
 
 static int gpio_bee_init(const struct device *dev)
 {
@@ -683,6 +841,14 @@ static DEVICE_API(gpio, gpio_bee_driver_api) = {
 
 #define GPIO_BEE_DATA_INIT(index) .array = gpio_pad_node_array##index,
 
+#if defined(BEE_GPIO_PM_STORE)
+#define GPIO_BEE_PM_DEFINE(index) PM_DEVICE_DT_INST_DEFINE(index, gpio_bee_pm_action);
+#define GPIO_BEE_PM_GET(index)    PM_DEVICE_DT_INST_GET(index)
+#else
+#define GPIO_BEE_PM_DEFINE(index)
+#define GPIO_BEE_PM_GET(index) NULL
+#endif
+
 #define GPIO_BEE_DEVICE_INIT(index)                                                                \
 	PINCTRL_DT_INST_DEFINE(index);                                                             \
 	GPIO_BEE_ARRAY_DEFINE(index)                                                               \
@@ -698,8 +864,9 @@ static DEVICE_API(gpio, gpio_bee_driver_api) = {
 		GPIO_BEE_GET_IRQ_INFO(index)};                                                     \
                                                                                                    \
 	static struct gpio_bee_data gpio_bee_port##index##_data = {GPIO_BEE_DATA_INIT(index)};     \
-	DEVICE_DT_INST_DEFINE(index, gpio_bee_init, NULL, &gpio_bee_port##index##_data,            \
-			      &gpio_bee_port##index##_cfg, POST_KERNEL, CONFIG_GPIO_INIT_PRIORITY, \
-			      &gpio_bee_driver_api);
+	GPIO_BEE_PM_DEFINE(index)                                                                  \
+	DEVICE_DT_INST_DEFINE(index, gpio_bee_init, GPIO_BEE_PM_GET(index),                        \
+			      &gpio_bee_port##index##_data, &gpio_bee_port##index##_cfg,            \
+			      POST_KERNEL, CONFIG_GPIO_INIT_PRIORITY, &gpio_bee_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(GPIO_BEE_DEVICE_INIT)
