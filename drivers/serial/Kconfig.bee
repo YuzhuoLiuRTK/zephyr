@@ -1,44 +1,31 @@
-# Copyright (c) 2026 Realtek Semiconductor Corp.
+# Copyright (c) 2026, Realtek Semiconductor Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 config UART_BEE
-	bool "UART driver for Realtek Bee series SoC"
+	bool "Realtek Bee series UART driver"
 	default y
 	depends on DT_HAS_REALTEK_BEE_UART_ENABLED
-	select USE_HAL_REALTEK_UART
+	select HAL_REALTEK_BEE_UART
 	select SERIAL_HAS_DRIVER
 	select SERIAL_SUPPORT_INTERRUPT
-	# the ASYNC implementation requires a DMA controller
+	select PINCTRL
 	select SERIAL_SUPPORT_ASYNC \
 		if DT_HAS_REALTEK_BEE_DMA_ENABLED
 	select DMA if UART_ASYNC_API
-
 	help
 	  This option enables the UART driver for Realtek Bee SoCs.
 
-if UART_BEE
-config UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-	bool "Keep active after rx wakeup"
-	default y
-	depends on PM_DEVICE
-	help
-	  Keep active and do not allow the system to suspend after rx wakeup.
-
-if UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
 config UART_BEE_KEEP_ACTIVE_TIMEOUT_MSEC
-	int "Milliseconds to keep active"
-	default 10000
+	int "Milliseconds to keep the UART active after it woke the system up"
+	depends on PM_DEVICE
+	default 5000
 	help
-	  Time to keep active after rx wakeup in milliseconds.
+	  Keep a UART powered for this long after its RX pad woke the system
+	  up, so that the incoming frame is received instead of dropped. Set
+	  to 0 to let the UART suspend again right away.
+
+	  This needs a devicetree node that is a wakeup-source and whose sleep
+	  pinctrl state configures a pin for wakeup.
+
 	  Note: This does not mean that the system will sleep immediately
 	  after timeout, it depends on other check status.
-
-endif # UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-
-config UART_BEE_RX_THRESHOLD
-	int "Rx threshold level to trigger interrupt"
-	default 10
-	help
-	  The Rx threshold level to trigger rx interrupt, range from 1 to 29.
-
-endif # UART_BEE

@@ -479,7 +479,7 @@ class Binding:
         # Allowed top-level keys. The 'include' key should have been
         # removed by _load_raw() already.
         ok_top = {"description", "compatible", "bus", "on-bus",
-                  "properties", "child-binding"}
+                  "properties", "child-binding", "examples"}
 
         # Descriptive errors for legacy bindings.
         legacy_errors = {

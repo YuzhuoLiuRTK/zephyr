@@ -195,14 +195,18 @@
 		};
 
 		timer2: timer@40002028 {
-			compatible = "realtek,bee-timer";
+			compatible = "realtek,bee-timer", "realtek,bee-basic-timer";
 			reg = <0x40002028 0x10>;
-			interrupts = <4 0>;
-			channels = <0>;
 			clocks = <&cctl APB_CLK(TIMER)>;
+			interrupts = <4 0>;
 			status = "disabled";
 
-			pwm2 {
+			counter {
+				compatible = "realtek,bee-counter-timer";
+				status = "disabled";
+			};
+
+			pwm {
 				compatible = "realtek,bee-pwm";
 				status = "disabled";
 				#pwm-cells = <3>;
@@ -210,14 +214,18 @@
 		};
 
 		timer3: timer@4000203c {
-			compatible = "realtek,bee-timer";
+			compatible = "realtek,bee-timer", "realtek,bee-basic-timer";
 			reg = <0x4000203c 0x10>;
-			interrupts = <3 0>;
-			channels = <0>;
 			clocks = <&cctl APB_CLK(TIMER)>;
+			interrupts = <3 0>;
 			status = "disabled";
 
-			pwm3 {
+			counter {
+				compatible = "realtek,bee-counter-timer";
+				status = "disabled";
+			};
+
+			pwm {
 				compatible = "realtek,bee-pwm";
 				status = "disabled";
 				#pwm-cells = <3>;
@@ -225,14 +233,18 @@
 		};
 
 		timer4: timer@40002050 {
-			compatible = "realtek,bee-timer";
+			compatible = "realtek,bee-timer", "realtek,bee-basic-timer";
 			reg = <0x40002050 0x10>;
-			interrupts = <8 0>;
-			channels = <0>;
 			clocks = <&cctl APB_CLK(TIMER)>;
+			interrupts = <8 0>;
 			status = "disabled";
 
-			pwm4 {
+			counter {
+				compatible = "realtek,bee-counter-timer";
+				status = "disabled";
+			};
+
+			pwm {
 				compatible = "realtek,bee-pwm";
 				status = "disabled";
 				#pwm-cells = <3>;
@@ -240,14 +252,18 @@
 		};
 
 		timer5: timer@40002064 {
-			compatible = "realtek,bee-timer";
+			compatible = "realtek,bee-timer", "realtek,bee-basic-timer";
 			reg = <0x40002064 0x10>;
-			interrupts = <8 0>;
-			channels = <0>;
 			clocks = <&cctl APB_CLK(TIMER)>;
+			interrupts = <8 0>;
 			status = "disabled";
 
-			pwm5 {
+			counter {
+				compatible = "realtek,bee-counter-timer";
+				status = "disabled";
+			};
+
+			pwm {
 				compatible = "realtek,bee-pwm";
 				status = "disabled";
 				#pwm-cells = <3>;
@@ -255,15 +271,18 @@
 		};
 
 		timer6: timer@40003000 {
-			compatible = "realtek,bee-timer";
+			compatible = "realtek,bee-timer", "realtek,bee-enhanced-timer";
 			reg = <0x40003000 0x400>;
-			interrupts = <24 0>;
-			is-enhanced;
-			channels = <0>;
 			clocks = <&cctl APB_CLK(ENHTIMER)>;
+			interrupts = <24 0>;
 			status = "disabled";
 
-			pwm6 {
+			counter {
+				compatible = "realtek,bee-counter-timer";
+				status = "disabled";
+			};
+
+			pwm {
 				compatible = "realtek,bee-pwm";
 				status = "disabled";
 				#pwm-cells = <3>;
@@ -271,15 +290,18 @@
 		};
 
 		timer7: timer@40003024 {
-			compatible = "realtek,bee-timer";
+			compatible = "realtek,bee-timer", "realtek,bee-enhanced-timer";
 			reg = <0x40003024 0x400>;
-			interrupts = <25 0>;
-			is-enhanced;
-			channels = <0>;
 			clocks = <&cctl APB_CLK(ENHTIMER)>;
+			interrupts = <25 0>;
 			status = "disabled";
 
-			pwm7 {
+			counter {
+				compatible = "realtek,bee-counter-timer";
+				status = "disabled";
+			};
+
+			pwm {
 				compatible = "realtek,bee-pwm";
 				status = "disabled";
 				#pwm-cells = <3>;
@@ -316,18 +338,16 @@
 			status = "disabled";
 		};
 
-		kscan: kscan@40005000 {
-			compatible = "realtek,bee-kscan";
+		keyscan: keyscan@40005000 {
+			compatible = "realtek,bee-keyscan";
 			reg = <0x40005000 0x34>;
 			interrupts = <19 0>;
 			clocks = <&cctl APB_CLK(KEYSCAN)>;
-			max-row-size = <12>;
-			max-col-size = <20>;
 			status = "disabled";
 		};
 
 		qdec: qdec@40004000 {
-			compatible = "realtek,bee-qdec";
+			compatible = "realtek,bee-basic-qdec";
 			clocks = <&cctl APB_CLK(QDEC)>;
 			reg = <0x40004000 0x30>;
 			interrupts = <19 0>;

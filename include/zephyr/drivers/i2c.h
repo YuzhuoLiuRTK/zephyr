@@ -483,6 +483,18 @@ static inline bool i2c_is_read_op(struct i2c_msg *msg)
 }
 
 /**
+ * @brief Check if the current message includes a stop.
+ *
+ * @param msg The message to check
+ * @return true if the I2C message includes a stop
+ * @return false if the I2C message includes a stop
+ */
+static inline bool i2c_is_stop_op(const struct i2c_msg *msg)
+{
+	return (msg->flags & I2C_MSG_STOP) == I2C_MSG_STOP;
+}
+
+/**
  * @brief Dump out an I2C message
  *
  * Dumps out a list of I2C messages. For any that are writes (W), the data is

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Realtek Semiconductor Corp.
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,81 +18,118 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/irq.h>
 #include <zephyr/pm/device.h>
-#include <zephyr/pm/policy.h>
+#include <zephyr/pm/device_runtime.h>
 
 #ifdef CONFIG_UART_ASYNC_API
 #include <zephyr/drivers/dma/dma_bee.h>
 #include <zephyr/drivers/dma.h>
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-#include <rtl_gdma.h>
-#elif defined(CONFIG_SOC_SERIES_RTL8752H)
-#include <rtl876x_gdma.h>
-#endif
 #endif
 
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 #include <rtl_uart.h>
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 #include <rtl876x_uart.h>
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#include <rtl_uart.h>
+#include <rtl_pinmux.h>
+#include <rtl_wakeup.h>
+#else
+#error "Unsupported Realtek Bee SoC series"
 #endif
 
-#ifdef CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
+#if defined(CONFIG_PM_DEVICE) && !defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+#define BEE_UART_PM_STORE 1
+#endif
+
+#if defined(CONFIG_PM_DEVICE) && (CONFIG_UART_BEE_KEEP_ACTIVE_TIMEOUT_MSEC > 0)
+#define BEE_UART_PM_WAKEUP 1
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+#define BEE_UART_PM_WAKEUP_PAD_CB 1
+#else
+#define BEE_UART_PM_WAKEUP_PM_CHECK 1
+#endif
+#endif
+
+#if !defined(CONFIG_REALTEK_BEE_HAS_PCK600)
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 #include <rtl_pinmux.h>
-#include <pm.h>
-#include "power_manager_unit_platform.h"
-#define BEE_PM_CHECK_PASS PM_CHECK_PASS
-#define BEE_PM_CHECK_FAIL PM_CHECK_FAIL
-#define BEE_PM_CHECK_RET  PMCheckResult
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 #include <rtl876x_pinmux.h>
+#endif
+#endif
+
+#if defined(BEE_UART_PM_WAKEUP)
+#if defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL8752H)
+#define BEE_UART_WAKEUP_CLEAR_INT_PENDING_BIT(pin) Pad_ClearWakeupINTPendingBit(pin)
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#define BEE_UART_WAKEUP_CLEAR_INT_PENDING_BIT(pin) System_WakeUpClearINTPendingBit(pin)
+#endif
+#endif
+
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+#include <pm.h>
+#include "power_manager_unit_platform.h"
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
 #include <dlps.h>
-#define BEE_PM_CHECK_PASS PM_CHECK_PASS
-#define BEE_PM_CHECK_FAIL PM_CHECK_FAIL
-#define BEE_PM_CHECK_RET  PMCheckResult
 extern void (*platform_pm_register_callback_func_with_priority)(void *cb_func,
 								PlatformPMStage pf_pm_stage,
 								int8_t priority);
 #endif
-#endif
+#define BEE_PM_CHECK_PASS PM_CHECK_PASS
+#define BEE_PM_CHECK_FAIL PM_CHECK_FAIL
+#define BEE_PM_CHECK_RET  PMCheckResult
+#endif /* BEE_UART_PM_WAKEUP_PM_CHECK */
 
+#if defined(BEE_UART_PM_STORE)
+/* Registers the HAL restores from its shadow copy, see uart_bee_pm_store_*() */
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
-/* for pm store */
 #define BEE_UART_REG_MISCR         UART_MISCR
 #define BEE_UART_REG_DLM_IER       UART_DLM_IER
 #define BEE_UART_REG_RX_TIMEOUT    UART_RX_TIMEOUT
 #define BEE_UART_REG_RX_TIMEOUT_EN UART_RX_TIMEOUT_EN
+typedef UARTStoreReg_Typedef uart_bee_store_reg_t;
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
-/* for pm store */
 #define BEE_UART_REG_MISCR         MISCR
 #define BEE_UART_REG_DLM_IER       DLH_INTCR
 #define BEE_UART_REG_RX_TIMEOUT    RX_IDLE_TOCR
 #define BEE_UART_REG_RX_TIMEOUT_EN RX_IDLE_INTCR
+typedef UARTStoreReg_TypeDef uart_bee_store_reg_t;
 #endif
+
+/* Not declared by the HAL headers */
+extern void UART_DLPSEnter(void *PeriReg, void *StoreBuf);
+extern void UART_DLPSExit(void *PeriReg, void *StoreBuf);
+#endif /* BEE_UART_PM_STORE */
 
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(uart_bee, CONFIG_UART_LOG_LEVEL);
 
-#ifdef CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-static BEE_PM_CHECK_RET uart_pm_check_state_timeout = BEE_PM_CHECK_PASS;
-
-static void uart_rx_wakeup_timer_cb(struct k_timer *timer);
-static K_TIMER_DEFINE(uart_rx_wakeup_timer, uart_rx_wakeup_timer_cb, NULL);
-
-#define DEVICE_DT_GET_AND_COMMA(node_id) DEVICE_DT_GET(node_id),
-static const struct device *const devices[] = {
-	DT_FOREACH_STATUS_OKAY(DT_DRV_COMPAT, DEVICE_DT_GET_AND_COMMA)};
-#endif
-
-#ifdef CONFIG_PM_DEVICE
-extern void UART_DLPSEnter(void *PeriReg, void *StoreBuf);
-extern void UART_DLPSExit(void *PeriReg, void *StoreBuf);
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+#define BEE_UART_DMA_ENABLE           UART_DMA_ENABLE
+#define BEE_UART_DMA_DISABLE          UART_DMA_DISABLE
+#define BEE_UART_DMAEN                UART_DmaEn
+#define BEE_UART_TX_DMA_CMD(uart, en) UART_TxDmaCmd(uart, en)
+#define BEE_UART_RX_DMA_CMD(uart, en) UART_RxDmaCmd(uart, en)
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+#define BEE_UART_DMA_ENABLE  UART_DMA_ENABLE
+#define BEE_UART_DMA_DISABLE UART_DMA_DISABLE
+#define BEE_UART_DMAEN       UART_DmaEn
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#define BEE_UART_DMA_ENABLE           ENABLE
+#define BEE_UART_DMA_DISABLE          DISABLE
+#define BEE_UART_DMAEN                UART_DMAEn
+#define BEE_UART_TX_DMA_CMD(uart, en) UART_TxDMACmd(uart, en)
+#define BEE_UART_RX_DMA_CMD(uart, en) UART_RxDMACmd(uart, en)
+#define UART_TX_FIFO_ADDR(UARTx)      (uint32_t)(&(((UART_TypeDef *)(UARTx))->UART_RBR_THR))
+#define UART_RX_FIFO_ADDR(UARTx)      (uint32_t)(&(((UART_TypeDef *)(UARTx))->UART_RBR_THR))
 #endif
 
 struct uart_bee_config {
 	UART_TypeDef *uart;
 	uint16_t clkid;
+	uint8_t rx_threshold;
 	bool hw_flow_ctrl;
 	const struct pinctrl_dev_config *pcfg;
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN) || defined(CONFIG_UART_ASYNC_API)
@@ -129,6 +166,22 @@ struct uart_bee_data {
 	bool tx_int_en;
 	bool rx_int_en;
 #endif
+	atomic_t pm_tx_held;
+	atomic_t pm_rx_held;
+#if defined(BEE_UART_PM_WAKEUP)
+	bool has_wakeup_pin;
+	pinctrl_soc_pin_t wakeup_pin;
+#endif
+#if defined(BEE_UART_PM_WAKEUP_PAD_CB)
+	/* Every UART is powered on its own, so it needs its own keep alive timer */
+	struct k_timer timer;
+#endif
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+	BEE_PM_CHECK_RET pm_check_state_idle;
+#endif
+#if defined(BEE_UART_PM_STORE)
+	uart_bee_store_reg_t store_buf;
+#endif
 #ifdef CONFIG_UART_ASYNC_API
 	uart_callback_t async_cb;
 	void *async_user_data;
@@ -137,60 +190,148 @@ struct uart_bee_data {
 	uint8_t *rx_next_buffer;
 	size_t rx_next_buffer_len;
 #endif
-#ifdef CONFIG_PM_DEVICE
-#ifdef CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-	BEE_PM_CHECK_RET uart_pm_check_state_idle;
-#endif
-	UARTStoreReg_Typedef store_buf;
-#endif
 };
 
-static const uint32_t RTL_UART_BAUDRATE_TABLE[][3] = {
-	{271, 10, 0x24A}, /* 9600    */
-	{150, 8, 0x3EF},  /* 19200   */
-	{20, 12, 0x252},  /* 115200  */
-	{11, 10, 0x3BB},  /* 230400  */
-	{11, 9, 0x084},   /* 256000  */
-	{7, 9, 0x3EF},    /* 384000  */
-	{6, 9, 0x0AA},    /* 460800  */
-	{3, 9, 0x0AA},    /* 921600  */
-	{4, 5, 0},        /* 1000000 */
-	{2, 5, 0},        /* 2000000 */
-	{1, 8, 0x292},    /* 3000000 */
+/* clang-format off */
+static const struct {
+	uint16_t div;
+	uint16_t ovsr;
+	uint16_t ovsr_adj;
+	uint32_t baudrate;
+} uart_bee_baudrate_table[] = {
+	{271, 10, 0x24A, 9600},
+	{150, 8, 0x3EF, 19200},
+	{20, 12, 0x252, 115200},
+	{11, 10, 0x3BB, 230400},
+	{11, 9, 0x084, 256000},
+	{7, 9, 0x3EF, 384000},
+	{6, 9, 0x0AA, 460800},
+	{3, 9, 0x0AA, 921600},
+	{4, 5, 0, 1000000},
+	{2, 5, 0, 2000000},
+	{1, 8, 0x292, 3000000},
 };
+/* clang-format on */
 
-static uint32_t rtl_cfg2idx_baudrate(uint32_t baudrate)
+static __maybe_unused void uart_bee_pm_get(const struct device *dev, atomic_t *held);
+static __maybe_unused void uart_bee_pm_put(const struct device *dev, atomic_t *held);
+
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+/* Every UART suspends at once, so a single keep alive timer covers them all */
+static BEE_PM_CHECK_RET uart_bee_pm_check_state_timeout = BEE_PM_CHECK_PASS;
+
+static void uart_bee_rx_wakeup_timer_cb(struct k_timer *timer);
+static K_TIMER_DEFINE(uart_bee_rx_wakeup_timer, uart_bee_rx_wakeup_timer_cb, NULL);
+
+#define BEE_UART_DEVICE_AND_COMMA(node_id) DEVICE_DT_GET(node_id),
+static const struct device *const uart_bee_devices[] = {
+	DT_FOREACH_STATUS_OKAY(DT_DRV_COMPAT, BEE_UART_DEVICE_AND_COMMA)};
+#endif
+
+#if defined(BEE_UART_PM_STORE)
+/* Registers written outside of UART_Init() have to reach the shadow copy too */
+static inline void uart_bee_pm_store_int(const struct device *dev)
 {
-	switch (baudrate) {
-	case 9600:
-		return 0;
-	case 19200:
-		return 1;
-	case 115200:
-		return 2;
-	case 230400:
-		return 3;
-	case 256000:
-		return 4;
-	case 384000:
-		return 5;
-	case 460800:
-		return 6;
-	case 921600:
-		return 7;
-	case 1000000:
-		return 8;
-	case 2000000:
-		return 9;
-	case 3000000:
-		return 10;
+	const struct uart_bee_config *config = dev->config;
+	struct uart_bee_data *data = dev->data;
+	UART_TypeDef *uart = config->uart;
 
-	default:
-		return -ENOSYS;
-	}
+	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
 }
 
-static uint16_t rtl_cfg2mac_data_bits(uint32_t data_bits)
+static inline void uart_bee_pm_store_rx_idle(const struct device *dev)
+{
+	const struct uart_bee_config *config = dev->config;
+	struct uart_bee_data *data = dev->data;
+	UART_TypeDef *uart = config->uart;
+
+	data->store_buf.uart_reg[8] = uart->BEE_UART_REG_RX_TIMEOUT;
+	data->store_buf.uart_reg[9] = uart->BEE_UART_REG_RX_TIMEOUT_EN;
+}
+
+static inline void uart_bee_pm_store_dma(const struct device *dev)
+{
+	const struct uart_bee_config *config = dev->config;
+	struct uart_bee_data *data = dev->data;
+	UART_TypeDef *uart = config->uart;
+
+	data->store_buf.uart_reg[10] = uart->BEE_UART_REG_MISCR;
+}
+#else
+#define uart_bee_pm_store_int(dev)
+#define uart_bee_pm_store_rx_idle(dev)
+#define uart_bee_pm_store_dma(dev)
+#endif /* BEE_UART_PM_STORE */
+
+#if defined(BEE_UART_PM_WAKEUP)
+static inline void uart_bee_wakeup_pin_config(const struct device *dev, bool enable)
+{
+	struct uart_bee_data *data = dev->data;
+
+	if (!data->has_wakeup_pin) {
+		return;
+	}
+
+	BEE_UART_WAKEUP_CLEAR_INT_PENDING_BIT(data->wakeup_pin.pin);
+
+	pinctrl_bee_wakeup_config(data->wakeup_pin.pin, data->wakeup_pin.wakeup_high,
+				  PINCTRL_BEE_WAKEUP_SYS, enable);
+}
+#else
+#define uart_bee_wakeup_pin_config(dev, enable)
+#endif
+
+#if defined(BEE_UART_PM_WAKEUP_PAD_CB)
+static inline void uart_bee_keep_alive_start(const struct device *dev)
+{
+	struct uart_bee_data *data = dev->data;
+
+	if (!data->has_wakeup_pin) {
+		return;
+	}
+
+	k_timer_start(&data->timer, K_MSEC(CONFIG_UART_BEE_KEEP_ACTIVE_TIMEOUT_MSEC), K_NO_WAIT);
+}
+
+static inline void uart_bee_keep_alive_stop(const struct device *dev)
+{
+	struct uart_bee_data *data = dev->data;
+
+	if (!data->has_wakeup_pin) {
+		return;
+	}
+
+	k_timer_stop(&data->timer);
+}
+#else
+#define uart_bee_keep_alive_start(dev)
+#define uart_bee_keep_alive_stop(dev)
+#endif
+
+#if defined(BEE_UART_PM_WAKEUP)
+static inline bool uart_bee_pm_can_gate_clock(const struct device *dev)
+{
+	const struct uart_bee_data *data = dev->data;
+
+	/* Without a pad to wake up from, a gated clock drops incoming frames */
+	return data->has_wakeup_pin;
+}
+#else
+#define uart_bee_pm_can_gate_clock(dev) true
+#endif
+
+static int uart_bee_cfg2idx_baudrate(uint32_t baudrate)
+{
+	for (uint32_t i = 0; i < ARRAY_SIZE(uart_bee_baudrate_table); i++) {
+		if (uart_bee_baudrate_table[i].baudrate == baudrate) {
+			return i;
+		}
+	}
+
+	return -ENOTSUP;
+}
+
+static int uart_bee_cfg2mac_data_bits(enum uart_config_data_bits data_bits)
 {
 	switch (data_bits) {
 	case UART_CFG_DATA_BITS_7:
@@ -198,11 +339,11 @@ static uint16_t rtl_cfg2mac_data_bits(uint32_t data_bits)
 	case UART_CFG_DATA_BITS_8:
 		return UART_WORD_LENGTH_8BIT;
 	default:
-		return -ENOSYS;
+		return -ENOTSUP;
 	}
 }
 
-static int rtl_cfg2mac_stopbits(uint32_t stop_bits)
+static int uart_bee_cfg2mac_stopbits(enum uart_config_stop_bits stop_bits)
 {
 	switch (stop_bits) {
 	case UART_CFG_STOP_BITS_1:
@@ -210,11 +351,11 @@ static int rtl_cfg2mac_stopbits(uint32_t stop_bits)
 	case UART_CFG_STOP_BITS_2:
 		return UART_STOP_BITS_2;
 	default:
-		return -ENOSYS;
+		return -ENOTSUP;
 	}
 }
 
-static uint16_t rtl_cfg2mac_parity(uint32_t parity)
+static int uart_bee_cfg2mac_parity(enum uart_config_parity parity)
 {
 	switch (parity) {
 	case UART_CFG_PARITY_NONE:
@@ -224,7 +365,7 @@ static uint16_t rtl_cfg2mac_parity(uint32_t parity)
 	case UART_CFG_PARITY_EVEN:
 		return UART_PARITY_EVEN;
 	default:
-		return -ENOSYS;
+		return -ENOTSUP;
 	}
 }
 
@@ -240,48 +381,48 @@ static int uart_bee_configure(const struct device *dev, const struct uart_config
 	int stopbits;
 	int parity;
 
-	baudrate_idx = rtl_cfg2idx_baudrate(cfg->baudrate);
+	baudrate_idx = uart_bee_cfg2idx_baudrate(cfg->baudrate);
 	if (baudrate_idx < 0) {
-		LOG_ERR("Unspported baudrate: %d", cfg->baudrate);
+		LOG_DBG("Unsupported baudrate: %d", cfg->baudrate);
 		return -ENOTSUP;
 	}
 
-	wordlen = rtl_cfg2mac_data_bits(cfg->data_bits);
+	wordlen = uart_bee_cfg2mac_data_bits(cfg->data_bits);
 	if (wordlen < 0) {
-		LOG_ERR("Unspported data_bits: %d", cfg->data_bits);
+		LOG_DBG("Unsupported data_bits: %d", cfg->data_bits);
 		return -ENOTSUP;
 	}
 
-	stopbits = rtl_cfg2mac_stopbits(cfg->stop_bits);
+	stopbits = uart_bee_cfg2mac_stopbits(cfg->stop_bits);
 	if (stopbits < 0) {
-		LOG_ERR("Unspported stop_bits: %d", cfg->stop_bits);
+		LOG_DBG("Unsupported stop_bits: %d", cfg->stop_bits);
 		return -ENOTSUP;
 	}
 
-	parity = rtl_cfg2mac_parity(cfg->parity);
+	parity = uart_bee_cfg2mac_parity(cfg->parity);
 	if (parity < 0) {
-		LOG_ERR("Unspported parity: %d", cfg->parity);
+		LOG_DBG("Unsupported parity: %d", cfg->parity);
 		return -ENOTSUP;
 	}
 
-	LOG_DBG("[%s] baudrate_idx=%d, wordlen=%d, stopbits=%d, parity=%d, "
-		   "hw_flow_ctrl=%d",
-		   __func__, baudrate_idx, wordlen, stopbits, parity, config->hw_flow_ctrl);
+	LOG_DBG("baudrate_idx=%d, wordlen=%d, stopbits=%d, parity=%d, "
+		"hw_flow_ctrl=%d",
+		baudrate_idx, wordlen, stopbits, parity, config->hw_flow_ctrl);
 
 	UART_StructInit(&uart_init_struct);
-	uart_init_struct.UART_Div = RTL_UART_BAUDRATE_TABLE[baudrate_idx][0];
-	uart_init_struct.UART_Ovsr = RTL_UART_BAUDRATE_TABLE[baudrate_idx][1];
-	uart_init_struct.UART_OvsrAdj = RTL_UART_BAUDRATE_TABLE[baudrate_idx][2];
+	uart_init_struct.UART_Div = uart_bee_baudrate_table[baudrate_idx].div;
+	uart_init_struct.UART_Ovsr = uart_bee_baudrate_table[baudrate_idx].ovsr;
+	uart_init_struct.UART_OvsrAdj = uart_bee_baudrate_table[baudrate_idx].ovsr_adj;
 	uart_init_struct.UART_IdleTime = UART_RX_IDLE_1BYTE;
 	uart_init_struct.UART_WordLen = wordlen;
 	uart_init_struct.UART_StopBits = stopbits;
 	uart_init_struct.UART_Parity = parity;
 	uart_init_struct.UART_HardwareFlowControl = cfg->flow_ctrl;
-	uart_init_struct.UART_RxThdLevel = CONFIG_UART_BEE_RX_THRESHOLD;
+	uart_init_struct.UART_RxThdLevel = config->rx_threshold;
 	uart_init_struct.UART_TxThdLevel = UART_TX_FIFO_SIZE / 2;
 
 #ifdef CONFIG_UART_ASYNC_API
-	uart_init_struct.UART_DmaEn = UART_DMA_ENABLE;
+	uart_init_struct.BEE_UART_DMAEN = BEE_UART_DMA_ENABLE;
 
 	if (data->dma_tx.dma_dev != NULL) {
 		uart_init_struct.UART_TxWaterLevel = 16 - data->dma_tx.dma_cfg.dest_burst_length;
@@ -292,8 +433,13 @@ static int uart_bee_configure(const struct device *dev, const struct uart_config
 	}
 #endif
 
+	(void)clock_control_off(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&config->clkid);
+	(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&config->clkid);
+
 	UART_Init(uart, &uart_init_struct);
-#ifdef CONFIG_PM_DEVICE
+
+#if defined(BEE_UART_PM_STORE)
+	/* Take the shadow copy the registers are restored from on resume */
 	UART_DLPSEnter(uart, &data->store_buf);
 #endif
 
@@ -320,7 +466,7 @@ static int uart_bee_poll_in(const struct device *dev, unsigned char *c)
 	if (!UART_GetFlagStatus(uart, UART_FLAG_RX_DATA_AVA)) {
 		return -1;
 	}
-	LOG_DBG("[%s] c=%c", __func__, *c);
+	LOG_DBG("c=%c", *c);
 
 	*c = (unsigned char)UART_ReceiveByte(uart);
 
@@ -336,6 +482,9 @@ static void uart_bee_poll_out(const struct device *dev, unsigned char c)
 	}
 
 	UART_SendByte(uart, (uint8_t)c);
+
+	while (UART_GetTxFIFODataLen(uart)) {
+	}
 }
 
 static int uart_bee_err_check(const struct device *dev)
@@ -365,7 +514,6 @@ static int uart_bee_err_check(const struct device *dev)
 }
 
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
-
 static int uart_bee_fifo_fill(const struct device *dev, const uint8_t *tx_data, int size)
 {
 	const struct uart_bee_config *config = dev->config;
@@ -385,7 +533,7 @@ static int uart_bee_fifo_fill(const struct device *dev, const uint8_t *tx_data, 
 
 	irq_unlock(key);
 
-	LOG_DBG("[%s] num_tx=%d", __func__, num_tx);
+	LOG_DBG("num_tx=%d", num_tx);
 
 	return num_tx;
 }
@@ -400,7 +548,7 @@ static int uart_bee_fifo_read(const struct device *dev, uint8_t *rx_data, const 
 		rx_data[num_rx++] = UART_ReceiveByte(uart);
 	}
 
-	LOG_DBG("[%s] num_rx=%d", __func__, num_rx);
+	LOG_DBG("num_rx=%d", num_rx);
 
 	return num_rx;
 }
@@ -411,10 +559,10 @@ static void uart_bee_irq_tx_enable(const struct device *dev)
 	UART_TypeDef *uart = config->uart;
 	struct uart_bee_data *data = dev->data;
 
-	LOG_DBG("[%s]", __func__);
-
 	data->tx_int_en = true;
 	UART_INTConfig(uart, UART_INT_TX_FIFO_EMPTY, ENABLE);
+
+	uart_bee_pm_store_int(dev);
 }
 
 static void uart_bee_irq_tx_disable(const struct device *dev)
@@ -423,14 +571,10 @@ static void uart_bee_irq_tx_disable(const struct device *dev)
 	UART_TypeDef *uart = config->uart;
 	struct uart_bee_data *data = dev->data;
 
-	LOG_DBG("[%s]", __func__);
-
 	data->tx_int_en = false;
 	UART_INTConfig(uart, UART_INT_TX_FIFO_EMPTY, DISABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
-#endif
+	uart_bee_pm_store_int(dev);
 }
 
 static int uart_bee_irq_tx_ready(const struct device *dev)
@@ -438,8 +582,6 @@ static int uart_bee_irq_tx_ready(const struct device *dev)
 	const struct uart_bee_config *config = dev->config;
 	struct uart_bee_data *data = dev->data;
 	UART_TypeDef *uart = config->uart;
-
-	LOG_DBG("[%s]", __func__);
 
 	return UART_GetFlagStatus(uart, UART_FLAG_TX_EMPTY) && data->tx_int_en;
 }
@@ -455,17 +597,16 @@ static void uart_bee_irq_rx_enable(const struct device *dev)
 	UART_TypeDef *uart = config->uart;
 	struct uart_bee_data *data = dev->data;
 
-	LOG_DBG("[%s]", __func__);
-
 	data->rx_int_en = true;
 	UART_INTConfig(uart, UART_INT_RD_AVA, ENABLE);
 	UART_INTConfig(uart, UART_INT_RX_IDLE, ENABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
-	data->store_buf.uart_reg[8] = uart->BEE_UART_REG_RX_TIMEOUT;
-	data->store_buf.uart_reg[9] = uart->BEE_UART_REG_RX_TIMEOUT_EN;
-#endif
+	uart_bee_pm_store_int(dev);
+	uart_bee_pm_store_rx_idle(dev);
+
+	uart_bee_pm_put(dev, &data->pm_rx_held);
+
+	uart_bee_wakeup_pin_config(dev, true);
 }
 
 static void uart_bee_irq_rx_disable(const struct device *dev)
@@ -474,37 +615,34 @@ static void uart_bee_irq_rx_disable(const struct device *dev)
 	UART_TypeDef *uart = config->uart;
 	struct uart_bee_data *data = dev->data;
 
-	LOG_DBG("[%s]", __func__);
-
 	data->rx_int_en = false;
 	UART_INTConfig(uart, UART_INT_RD_AVA, DISABLE);
 	UART_INTConfig(uart, UART_INT_RX_IDLE, DISABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
-	data->store_buf.uart_reg[8] = uart->BEE_UART_REG_RX_TIMEOUT;
-	data->store_buf.uart_reg[9] = uart->BEE_UART_REG_RX_TIMEOUT_EN;
-#endif
+	uart_bee_pm_store_int(dev);
+	uart_bee_pm_store_rx_idle(dev);
+
+	uart_bee_wakeup_pin_config(dev, false);
+
+	uart_bee_keep_alive_stop(dev);
+
+	uart_bee_pm_put(dev, &data->pm_rx_held);
 }
 
 static int uart_bee_irq_rx_ready(const struct device *dev)
 {
 	const struct uart_bee_config *config = dev->config;
 	UART_TypeDef *uart = config->uart;
-	struct uart_bee_data *data;
-	int status;
+	int status = UART_GetFlagStatus(uart, UART_FLAG_RX_DATA_AVA);
 
-	LOG_DBG("[%s]", __func__);
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+	struct uart_bee_data *data = dev->data;
 
-	status = UART_GetFlagStatus(uart, UART_FLAG_RX_DATA_AVA);
-
-	data = dev->data;
-
-#ifdef CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
 	if (status) {
-		data->uart_pm_check_state_idle = BEE_PM_CHECK_FAIL;
+		data->pm_check_state_idle = BEE_PM_CHECK_FAIL;
 	}
 #endif
+
 	return status;
 }
 
@@ -512,34 +650,20 @@ static void uart_bee_irq_err_enable(const struct device *dev)
 {
 	const struct uart_bee_config *config = dev->config;
 	UART_TypeDef *uart = config->uart;
-	struct uart_bee_data *data;
-
-	data = dev->data;
-
-	LOG_DBG("[%s]", __func__);
 
 	UART_INTConfig(uart, UART_INT_RX_LINE_STS, ENABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
-#endif
+	uart_bee_pm_store_int(dev);
 }
 
 static void uart_bee_irq_err_disable(const struct device *dev)
 {
 	const struct uart_bee_config *config = dev->config;
 	UART_TypeDef *uart = config->uart;
-	struct uart_bee_data *data;
-
-	data = dev->data;
-
-	LOG_DBG("[%s]", __func__);
 
 	UART_INTConfig(uart, UART_INT_RX_LINE_STS, DISABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
-#endif
+	uart_bee_pm_store_int(dev);
 }
 
 static int uart_bee_irq_is_pending(const struct device *dev)
@@ -547,8 +671,6 @@ static int uart_bee_irq_is_pending(const struct device *dev)
 	const struct uart_bee_config *config = dev->config;
 	struct uart_bee_data *data = dev->data;
 	UART_TypeDef *uart = config->uart;
-
-	LOG_DBG("[%s]", __func__);
 
 	return ((UART_GetFlagStatus(uart, UART_FLAG_TX_EMPTY) && data->tx_int_en) ||
 		(UART_GetFlagStatus(uart, UART_INT_RD_AVA) && data->rx_int_en));
@@ -564,24 +686,191 @@ static void uart_bee_irq_callback_set(const struct device *dev, uart_irq_callbac
 {
 	struct uart_bee_data *data = dev->data;
 
-	LOG_DBG("[%s]", __func__);
-
 	data->user_cb = cb;
 	data->user_data = cb_data;
 }
 
 #endif /* CONFIG_UART_INTERRUPT_DRIVEN */
 
+/* Also called by pm_device_driver_init(), so a device ends up active even when
+ * no power management is enabled at all.
+ */
+static int uart_bee_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	const struct uart_bee_config *config = dev->config;
+	UART_TypeDef *uart = config->uart;
+	int err;
+
+	ARG_UNUSED(uart);
+	ARG_UNUSED(err);
+
+#if defined(BEE_UART_PM_STORE) || defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+	struct uart_bee_data *data = dev->data;
+#endif
+
+	switch (action) {
+	case PM_DEVICE_ACTION_RESUME:
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+		/* Taking the clock back raises the active request and moves the
+		 * pads out of their sleep configuration. Registers are retained.
+		 */
+		UART_ClockAutoModeCmd(uart, DISABLE);
+#else
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+		/* Hold off the next suspend when this UART is what woke us up */
+		if (data->has_wakeup_pin && System_WakeUpInterruptValue(data->wakeup_pin.pin)) {
+			uart_bee_pm_check_state_timeout = BEE_PM_CHECK_FAIL;
+			k_timer_start(&uart_bee_rx_wakeup_timer,
+				      K_MSEC(CONFIG_UART_BEE_KEEP_ACTIVE_TIMEOUT_MSEC), K_NO_WAIT);
+		}
+#endif
+
+		/* Move the pads back to the active state by hand */
+		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
+		if (err < 0) {
+			return err;
+		}
+
+		(void)clock_control_on(BEE_CLOCK_CONTROLLER,
+				       (clock_control_subsys_t)&config->clkid);
+
+#if defined(BEE_UART_PM_STORE)
+		UART_DLPSExit(uart, &data->store_buf);
+#endif
+#endif
+		break;
+	case PM_DEVICE_ACTION_SUSPEND:
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+		/* Handing the clock back drops the active request, gates the
+		 * clock once idle and moves the pads to their sleep configuration.
+		 */
+		if (uart_bee_pm_can_gate_clock(dev)) {
+			UART_ClockAutoModeCmd(uart, ENABLE);
+		}
+#else
+		(void)clock_control_off(BEE_CLOCK_CONTROLLER,
+				       (clock_control_subsys_t)&config->clkid);
+
+		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+		if ((err < 0) && (err != -ENOENT)) {
+			return err;
+		}
+#endif
+		break;
+	case PM_DEVICE_ACTION_TURN_ON:
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+		/* Has to reach the suspended configuration from any state */
+		if (uart_bee_pm_can_gate_clock(dev)) {
+			UART_ClockAutoModeCmd(uart, ENABLE);
+		}
+#endif
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
+/* Take a single runtime PM reference on behalf of @p held, which tracks whether
+ * the TX or the RX path owns one. Both run from thread and interrupt context.
+ */
+static void uart_bee_pm_get(const struct device *dev, atomic_t *held)
+{
+	int err;
+
+	if (!atomic_cas(held, 0, 1)) {
+		return;
+	}
+
+	err = pm_device_runtime_get(dev);
+	if (err < 0) {
+		LOG_ERR("%s: failed to resume device (%d)", dev->name, err);
+		atomic_clear(held);
+	}
+}
+
+static void uart_bee_pm_put(const struct device *dev, atomic_t *held)
+{
+	int err;
+
+	if (!atomic_cas(held, 1, 0)) {
+		return;
+	}
+
+	err = pm_device_runtime_put(dev);
+	if (err < 0) {
+		LOG_ERR("%s: failed to suspend device (%d)", dev->name, err);
+	}
+}
+
+#if defined(BEE_UART_PM_WAKEUP_PAD_CB)
+static void uart_bee_rx_wakeup_timer_cb(struct k_timer *timer)
+{
+	const struct device *dev = (const struct device *)timer->user_data;
+	struct uart_bee_data *data = dev->data;
+
+	k_timer_stop(timer);
+
+	uart_bee_pm_put(dev, &data->pm_rx_held);
+
+	uart_bee_wakeup_pin_config(dev, true);
+}
+
+void uart_bee_process_pad_wakeup_cb(void *user_data)
+{
+	const struct device *dev = (const struct device *)user_data;
+	struct uart_bee_data *data = dev->data;
+
+	uart_bee_pm_get(dev, &data->pm_rx_held);
+
+	uart_bee_keep_alive_start(dev);
+}
+#endif /* BEE_UART_PM_WAKEUP_PAD_CB */
+
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+static BEE_PM_CHECK_RET uart_bee_pm_check(void)
+{
+	BEE_PM_CHECK_RET ret = BEE_PM_CHECK_FAIL;
+	struct uart_bee_data *data;
+
+	if (uart_bee_pm_check_state_timeout == BEE_PM_CHECK_PASS) {
+		for (int i = 0; i < ARRAY_SIZE(uart_bee_devices); i++) {
+			data = (struct uart_bee_data *)(uart_bee_devices[i]->data);
+			if (data->pm_check_state_idle == BEE_PM_CHECK_FAIL) {
+				goto check_ret;
+			}
+		}
+		ret = BEE_PM_CHECK_PASS;
+	}
+check_ret:
+	return ret;
+}
+
+static void uart_bee_register_pm_check_cb(void)
+{
+	platform_pm_register_callback_func_with_priority((void *)uart_bee_pm_check,
+							PLATFORM_PM_CHECK, 1);
+}
+
+static void uart_bee_rx_wakeup_timer_cb(struct k_timer *timer)
+{
+	k_timer_stop(timer);
+
+	uart_bee_pm_check_state_timeout = BEE_PM_CHECK_PASS;
+}
+#endif /* BEE_UART_PM_WAKEUP_PM_CHECK */
+
 #ifdef CONFIG_UART_LINE_CTRL
 int uart_bee_line_ctrl_set(const struct device *dev, uint32_t ctrl, uint32_t val)
 {
-	LOG_ERR("Unsupport line_ctrl_set function");
+	LOG_ERR("Unsupported line_ctrl_set function");
 	return -ENOTSUP;
 }
 
 int uart_bee_line_ctrl_get(const struct device *dev, uint32_t ctrl, uint32_t *val)
 {
-	LOG_ERR("Unsupport line_ctrl_get function");
+	LOG_ERR("Unsupported line_ctrl_get function");
 	return -ENOTSUP;
 }
 #endif
@@ -589,11 +878,55 @@ int uart_bee_line_ctrl_get(const struct device *dev, uint32_t ctrl, uint32_t *va
 #ifdef CONFIG_UART_DRV_CMD
 int uart_bee_drv_cmd(const struct device *dev, uint32_t cmd, uint32_t p)
 {
-	LOG_ERR("Unsupport drv_cmd function");
+	LOG_ERR("Unsupported drv_cmd function");
 	return -ENOTSUP;
 }
 #endif
 #ifdef CONFIG_UART_ASYNC_API
+static void uart_bee_dma_replace_buffer(const struct device *dev);
+static int uart_bee_async_rx_disable(const struct device *dev);
+
+static void uart_bee_dma_tx_control(UART_TypeDef *uart, bool en)
+{
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+	BEE_UART_TX_DMA_CMD(uart, en);
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+	if (en) {
+		uart->MISCR |= BIT(1);
+	} else {
+		uart->MISCR &= ~BIT(1);
+	}
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+	BEE_UART_TX_DMA_CMD(uart, en);
+#endif
+}
+
+static void uart_bee_dma_rx_control(UART_TypeDef *uart, bool en)
+{
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+	BEE_UART_RX_DMA_CMD(uart, en);
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+	if (en) {
+		uart->MISCR |= BIT(2);
+	} else {
+		uart->MISCR &= ~BIT(2);
+	}
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+	BEE_UART_RX_DMA_CMD(uart, en);
+#endif
+}
+
+static int uart_bee_async_callback_set(const struct device *dev, uart_callback_t callback,
+				       void *user_data)
+{
+	struct uart_bee_data *data = dev->data;
+
+	data->async_cb = callback;
+	data->async_user_data = user_data;
+
+	return 0;
+}
+
 static inline void async_user_callback(struct uart_bee_data *data, struct uart_event *event)
 {
 	if (data->async_cb) {
@@ -601,29 +934,75 @@ static inline void async_user_callback(struct uart_bee_data *data, struct uart_e
 	}
 }
 
+static inline void async_evt_tx_done(struct uart_bee_data *data)
+{
+	struct uart_event event = {.type = UART_TX_DONE,
+				   .data.tx.buf = data->dma_tx.buffer,
+				   .data.tx.len = data->dma_tx.counter};
+
+	/* Reset the TX buffer */
+	data->dma_tx.buffer_length = 0;
+	data->dma_tx.counter = 0;
+
+	async_user_callback(data, &event);
+}
+
+static inline void async_evt_tx_abort(struct uart_bee_data *data)
+{
+	struct uart_event event = {.type = UART_TX_ABORTED,
+				   .data.tx.buf = data->dma_tx.buffer,
+				   .data.tx.len = data->dma_tx.counter};
+
+	/* Reset the TX buffer */
+	data->dma_tx.buffer_length = 0;
+	data->dma_tx.counter = 0;
+
+	async_user_callback(data, &event);
+}
+
 static inline void async_evt_rx_rdy(struct uart_bee_data *data)
 {
 	struct uart_event event = {.type = UART_RX_RDY,
 				   .data.rx.buf = data->dma_rx.buffer,
-				   .data.rx.len = data->dma_rx.counter - data->dma_rx.offset,
-				   .data.rx.offset = data->dma_rx.offset};
+				   .data.rx.len = data->dma_rx.counter,
+				   .data.rx.offset = 0};
 
-	LOG_DBG("[%s] data->dma_rx.counter=%d, data->dma_rx.offset=%d", __func__,
-		   data->dma_rx.counter, data->dma_rx.offset);
-
-	/* update the current pos for new data */
-	data->dma_rx.offset = data->dma_rx.counter;
-
-	/* send event only for new data */
+	/* Send event only for new data */
 	if (event.data.rx.len > 0) {
 		async_user_callback(data, &event);
 	}
 }
 
+static inline void async_evt_rx_buf_request(struct uart_bee_data *data)
+{
+	struct uart_event event = {
+		.type = UART_RX_BUF_REQUEST,
+	};
+
+	async_user_callback(data, &event);
+}
+
+static inline void async_evt_rx_buf_release(struct uart_bee_data *data)
+{
+	struct uart_event event = {
+		.type = UART_RX_BUF_RELEASED,
+		.data.rx_buf.buf = data->dma_rx.buffer,
+	};
+
+	async_user_callback(data, &event);
+}
+
+static inline void async_evt_rx_disable(struct uart_bee_data *data)
+{
+	struct uart_event event = {
+		.type = UART_RX_DISABLED,
+	};
+
+	async_user_callback(data, &event);
+}
+
 static inline void async_evt_rx_err(struct uart_bee_data *data, int err_code)
 {
-	LOG_DBG("rx error: %d", err_code);
-
 	struct uart_event event = {.type = UART_RX_STOPPED,
 				   .data.rx_stop.reason = err_code,
 				   .data.rx_stop.data.len = data->dma_rx.counter,
@@ -633,85 +1012,13 @@ static inline void async_evt_rx_err(struct uart_bee_data *data, int err_code)
 	async_user_callback(data, &event);
 }
 
-static inline void async_evt_tx_done(struct uart_bee_data *data)
-{
-	LOG_DBG("tx done: %d", data->dma_tx.counter);
-
-	struct uart_event event = {.type = UART_TX_DONE,
-				   .data.tx.buf = data->dma_tx.buffer,
-				   .data.tx.len = data->dma_tx.counter};
-
-	/* Reset tx buffer */
-	data->dma_tx.buffer_length = 0;
-	data->dma_tx.counter = 0;
-
-	async_user_callback(data, &event);
-}
-
-static inline void async_evt_tx_abort(struct uart_bee_data *data)
-{
-	LOG_DBG("tx abort: %d", data->dma_tx.counter);
-
-	struct uart_event event = {.type = UART_TX_ABORTED,
-				   .data.tx.buf = data->dma_tx.buffer,
-				   .data.tx.len = data->dma_tx.counter};
-
-	/* Reset tx buffer */
-	data->dma_tx.buffer_length = 0;
-	data->dma_tx.counter = 0;
-
-	async_user_callback(data, &event);
-}
-
-static inline void async_evt_rx_buf_request(struct uart_bee_data *data)
-{
-	struct uart_event evt = {
-		.type = UART_RX_BUF_REQUEST,
-	};
-
-	async_user_callback(data, &evt);
-}
-
-static inline void async_evt_rx_buf_release(struct uart_bee_data *data)
-{
-	struct uart_event evt = {
-		.type = UART_RX_BUF_RELEASED,
-		.data.rx_buf.buf = data->dma_rx.buffer,
-	};
-
-	async_user_callback(data, &evt);
-}
-
 static inline void async_timer_start(struct k_work_delayable *work, int32_t timeout)
 {
 	if ((timeout != SYS_FOREVER_US) && (timeout != 0)) {
-		/* start timer */
-		LOG_DBG("async timer started for %d us", timeout);
+		LOG_DBG("Async timer started for %d us", timeout);
+
+		/* Start the timeout timer */
 		k_work_reschedule(work, K_USEC(timeout));
-	}
-}
-
-static void uart_bee_dma_rx_flush(const struct device *dev)
-{
-	struct dma_status stat;
-	struct uart_bee_data *data = dev->data;
-
-	LOG_DBG("[%s]", __func__);
-
-	if (dma_get_status(data->dma_rx.dma_dev, data->dma_rx.dma_channel, &stat) == 0) {
-		size_t rx_rcv_len = data->dma_rx.buffer_length - stat.pending_length;
-
-		LOG_DBG("[%s] data->dma_rx.buffer_length=%d, stat.pending_length=%d, "
-			   "rx_rcv_len=%d, "
-			   "data->dma_rx.offset=%d, rx fifo=%d",
-			   __func__, data->dma_rx.buffer_length, stat.pending_length, rx_rcv_len,
-			   data->dma_rx.offset,
-			   UART_GetRxFIFOLen(((struct uart_bee_config *)(dev->config))->uart));
-		if (rx_rcv_len > data->dma_rx.offset) {
-			data->dma_rx.counter = rx_rcv_len;
-
-			async_evt_rx_rdy(data);
-		}
 	}
 }
 
@@ -719,32 +1026,20 @@ static inline void uart_bee_dma_tx_enable(const struct device *dev)
 {
 	const struct uart_bee_config *config = dev->config;
 	UART_TypeDef *uart = config->uart;
-	struct uart_bee_data *data;
 
-	LOG_DBG("[%s]", __func__);
+	uart_bee_dma_tx_control(uart, true);
 
-	data = dev->data;
-
-	UART_TxDmaCmd(uart, true);
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[10] = uart->BEE_UART_REG_MISCR;
-#endif
+	uart_bee_pm_store_dma(dev);
 }
 
 static inline void uart_bee_dma_tx_disable(const struct device *dev)
 {
 	const struct uart_bee_config *config = dev->config;
 	UART_TypeDef *uart = config->uart;
-	struct uart_bee_data *data;
 
-	LOG_DBG("[%s]", __func__);
+	uart_bee_dma_tx_control(uart, false);
 
-	data = dev->data;
-
-	UART_TxDmaCmd(uart, false);
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[10] = uart->BEE_UART_REG_MISCR;
-#endif
+	uart_bee_pm_store_dma(dev);
 }
 
 static inline void uart_bee_dma_rx_enable(const struct device *dev)
@@ -753,13 +1048,9 @@ static inline void uart_bee_dma_rx_enable(const struct device *dev)
 	struct uart_bee_data *data = dev->data;
 	UART_TypeDef *uart = config->uart;
 
-	LOG_DBG("[%s]", __func__);
+	uart_bee_dma_rx_control(uart, true);
 
-	UART_RxDmaCmd(uart, true);
-
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[10] = uart->BEE_UART_REG_MISCR;
-#endif
+	uart_bee_pm_store_dma(dev);
 
 	data->dma_rx.enabled = true;
 }
@@ -770,13 +1061,9 @@ static inline void uart_bee_dma_rx_disable(const struct device *dev)
 	struct uart_bee_data *data = dev->data;
 	UART_TypeDef *uart = config->uart;
 
-	LOG_DBG("[%s]", __func__);
+	uart_bee_dma_rx_control(uart, false);
 
-	UART_RxDmaCmd(uart, false);
-
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[10] = uart->BEE_UART_REG_MISCR;
-#endif
+	uart_bee_pm_store_dma(dev);
 
 	data->dma_rx.enabled = false;
 }
@@ -786,56 +1073,82 @@ void uart_bee_dma_tx_cb(const struct device *dma_dev, void *user_data, uint32_t 
 	const struct device *uart_dev = user_data;
 	struct uart_bee_data *data = uart_dev->data;
 	struct dma_status stat;
-	unsigned int key = irq_lock();
 
-	/* Disable TX */
+	/* Disable the UART TX DMA requests */
 	uart_bee_dma_tx_disable(uart_dev);
 
+	uart_bee_pm_put(uart_dev, &data->pm_tx_held);
+
+	/* Stop the TX timeout timer */
 	(void)k_work_cancel_delayable(&data->dma_tx.timeout_work);
 
+	/* Get the DMA TX length */
 	if (!dma_get_status(data->dma_tx.dma_dev, data->dma_tx.dma_channel, &stat)) {
 		data->dma_tx.counter = data->dma_tx.buffer_length - stat.pending_length;
 	}
 
-	LOG_DBG("[%s] channel=%d, status=%d, dma_tx.counter=%d", __func__, channel, status,
-		   data->dma_tx.counter);
+	LOG_DBG("channel=%d, status=%d, dma_tx.counter=%d", channel, status, data->dma_tx.counter);
 
 	data->dma_tx.buffer_length = 0;
 
-	irq_unlock(key);
-
+	/* Stop the TX DMA */
 	dma_stop(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
 
-	/* Generate TX_DONE event when transmission is done */
+	/* Generate TX_DONE event when TX is done */
 	async_evt_tx_done(data);
 }
 
 static void uart_bee_dma_replace_buffer(const struct device *dev)
 {
-	const struct device *uart_dev = dev;
-	struct uart_bee_data *data = uart_dev->data;
+	struct uart_bee_data *data = dev->data;
 
-	/* Replace the buffer and reload the DMA */
-	LOG_DBG("[%s] Replacing RX buffer: %d", __func__, data->rx_next_buffer_len);
+	LOG_DBG("Replacing RX buffer: %d", data->rx_next_buffer_len);
 
-	/* reload DMA */
-	data->dma_rx.offset = 0;
-	data->dma_rx.counter = 0;
-	data->dma_rx.buffer = data->rx_next_buffer;
-	data->dma_rx.buffer_length = data->rx_next_buffer_len;
-	data->dma_rx.blk_cfg.block_size = data->dma_rx.buffer_length;
-	data->dma_rx.blk_cfg.dest_address = (uint32_t)(data->dma_rx.buffer);
-	data->rx_next_buffer = NULL;
-	data->rx_next_buffer_len = 0;
+	/* Replace the RX DMA buffer and reload the RX DMA */
+	data->dma_rx.blk_cfg.block_size = data->rx_next_buffer_len;
+	data->dma_rx.blk_cfg.dest_address = (uint32_t)(data->rx_next_buffer);
 
 	dma_reload(data->dma_rx.dma_dev, data->dma_rx.dma_channel,
 		   data->dma_rx.blk_cfg.source_address, data->dma_rx.blk_cfg.dest_address,
 		   data->dma_rx.blk_cfg.block_size);
 
 	dma_start(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
+}
 
-	/* Request next buffer */
-	async_evt_rx_buf_request(data);
+static void uart_bee_dma_rx_calc_counter(struct uart_bee_data *data)
+{
+	struct dma_status stat;
+	/* Get the DMA RX length */
+	if (!dma_get_status(data->dma_rx.dma_dev, data->dma_rx.dma_channel, &stat)) {
+		data->dma_rx.counter = data->dma_rx.buffer_length - stat.pending_length;
+	}
+}
+
+static void uart_bee_rx_proceed_next_or_disable(const struct device *dev)
+{
+	struct uart_bee_data *data = dev->data;
+
+	if (data->rx_next_buffer) {
+		/* Directly reload the RX DMA buffer and start DMA to minimize overhead, preventing
+		 * data loss caused by UART RX FIFO overflow.
+		 */
+		uart_bee_dma_replace_buffer(dev);
+		/* Generate RX_RDY event with the received data */
+		async_evt_rx_rdy(data);
+		/* Generate RX_BUF_RELEASED event to release every passed buffer */
+		async_evt_rx_buf_release(data);
+		data->dma_rx.buffer = data->rx_next_buffer;
+		data->dma_rx.buffer_length = data->rx_next_buffer_len;
+		data->rx_next_buffer = 0;
+		data->rx_next_buffer_len = 0;
+		/* Generate RX_BUF_REQUEST event to get the next buffer */
+		async_evt_rx_buf_request(data);
+	} else {
+		/* No next buffer available. Proceed directly to the disable flow and report the
+		 * received data.
+		 */
+		uart_bee_async_rx_disable(dev);
+	}
 }
 
 void uart_bee_dma_rx_cb(const struct device *dma_dev, void *user_data, uint32_t channel, int status)
@@ -843,48 +1156,19 @@ void uart_bee_dma_rx_cb(const struct device *dma_dev, void *user_data, uint32_t 
 	const struct device *uart_dev = user_data;
 	struct uart_bee_data *data = uart_dev->data;
 
-	LOG_DBG("[%s] channel=%d, status=%d", __func__, channel, status);
+	/* Get the DMA RX length */
+	uart_bee_dma_rx_calc_counter(data);
 
 	if (status < 0) {
 		async_evt_rx_err(data, status);
 		return;
 	}
 
+	/* Reload buffer or disable RX */
+	uart_bee_rx_proceed_next_or_disable(uart_dev);
+
+	/* Stop the RX timeout timer */
 	(void)k_work_cancel_delayable(&data->dma_rx.timeout_work);
-
-	/* true since this functions occurs when buffer if full */
-	data->dma_rx.counter = data->dma_rx.buffer_length;
-
-	async_evt_rx_rdy(data);
-
-	if (data->rx_next_buffer != NULL) {
-		LOG_DBG("[%s] channel=%d, status=%d, data->rx_next_buffer "
-			   "= 0x%p",
-			   __func__, channel, status, data->rx_next_buffer);
-		async_evt_rx_buf_release(data);
-
-		/* replace the buffer when the current is full and not the same as the next one. */
-		uart_bee_dma_replace_buffer(uart_dev);
-	} else {
-		LOG_DBG("[%s] channel=%d, status=%d, data->rx_next_buffer "
-			   "== NULL",
-			   __func__, channel, status);
-
-		k_work_reschedule(&data->dma_rx.timeout_work, K_TICKS(1));
-	}
-}
-
-static int uart_bee_async_callback_set(const struct device *dev, uart_callback_t callback,
-				       void *user_data)
-{
-	struct uart_bee_data *data = dev->data;
-
-	LOG_DBG("[%s]", __func__);
-
-	data->async_cb = callback;
-	data->async_user_data = user_data;
-
-	return 0;
 }
 
 static int uart_bee_async_tx(const struct device *dev, const uint8_t *tx_data, size_t buf_size,
@@ -893,7 +1177,7 @@ static int uart_bee_async_tx(const struct device *dev, const uint8_t *tx_data, s
 	struct uart_bee_data *data = dev->data;
 	int ret;
 
-	LOG_DBG("[%s] bufsize=%d, timeout=%d", __func__, buf_size, timeout);
+	LOG_DBG("bufsize=%d, timeout=%d", buf_size, timeout);
 
 	if (data->dma_tx.dma_dev == NULL) {
 		return -ENODEV;
@@ -907,54 +1191,63 @@ static int uart_bee_async_tx(const struct device *dev, const uint8_t *tx_data, s
 	data->dma_tx.buffer_length = buf_size;
 	data->dma_tx.timeout = timeout;
 
-	LOG_DBG("tx: l=%d", data->dma_tx.buffer_length);
-
-	/* set source address */
+	/* Set source address */
 	data->dma_tx.blk_cfg.source_address = (uint32_t)(data->dma_tx.buffer);
 	data->dma_tx.blk_cfg.block_size = data->dma_tx.buffer_length;
 
 	ret = dma_config(data->dma_tx.dma_dev, data->dma_tx.dma_channel, &data->dma_tx.dma_cfg);
 
 	if (ret != 0) {
-		LOG_ERR("dma tx config error!");
+		LOG_ERR("DMA TX config error!");
 		return -EINVAL;
 	}
 
-	/* Start TX timer */
+	uart_bee_pm_get(dev, &data->pm_tx_held);
+
+	/* Start the TX timeout timer */
 	async_timer_start(&data->dma_tx.timeout_work, data->dma_tx.timeout);
 
-	/* Enable TX DMA requests */
+	/* Enable the UART TX DMA requests */
 	uart_bee_dma_tx_enable(dev);
 
-	if (dma_start(data->dma_tx.dma_dev, data->dma_tx.dma_channel)) {
-		LOG_ERR("UART err: TX DMA start failed!");
-		return -EFAULT;
-	}
+	/* Start the TX dma */
+	dma_start(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
 
 	return 0;
 }
 
 static int uart_bee_async_tx_abort(const struct device *dev)
 {
+	const struct uart_bee_config *config = dev->config;
 	struct uart_bee_data *data = dev->data;
+	UART_TypeDef *uart = config->uart;
 	size_t tx_buffer_length = data->dma_tx.buffer_length;
 	struct dma_status stat;
-
-	LOG_DBG("[%s]", __func__);
 
 	if (tx_buffer_length == 0) {
 		return -EFAULT;
 	}
 
+	/* Stop the TX timeout timer */
 	(void)k_work_cancel_delayable(&data->dma_tx.timeout_work);
 
+	/* Suspend the TX DMA to get the transmitted data length */
 	dma_suspend(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
 
+	/* Get the transmitted data length */
 	if (!dma_get_status(data->dma_tx.dma_dev, data->dma_tx.dma_channel, &stat)) {
 		data->dma_tx.counter = tx_buffer_length - stat.pending_length;
 	}
 
+	/* Stop the TX dma */
 	dma_stop(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
+
+	while (UART_GetTxFIFODataLen(uart)) {
+	}
+
+	uart_bee_pm_put(dev, &data->pm_tx_held);
+
+	/* Generate TX_ABORTED event with the TX is aborted */
 	async_evt_tx_abort(data);
 
 	return 0;
@@ -968,9 +1261,19 @@ static int uart_bee_async_rx_enable(const struct device *dev, uint8_t *rx_buf, s
 	UART_TypeDef *uart = config->uart;
 	int ret;
 
-	LOG_DBG("[%s] buf_size=%d, timeout=%d", __func__, buf_size, timeout);
+	LOG_DBG("buf_size=%d, timeout=%d", buf_size, timeout);
 
-	uint32_t cnt = UART_GetRxFIFOLen(uart);
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+	/* Let the RX path raise its own PCK-600 active request again */
+	UART_TxOnlyModeCmd(uart, DISABLE);
+#endif
+
+	uart_bee_pm_put(dev, &data->pm_rx_held);
+
+	uart_bee_wakeup_pin_config(dev, true);
+
+	/* Flush the UART RX FIFO to prevent processing stale data received before enabling. */
+	uint32_t cnt = UART_GetRxFIFODataLen(uart);
 
 	for (uint32_t i = 0; i < cnt; i++) {
 		UART_ReceiveByte(uart);
@@ -985,18 +1288,20 @@ static int uart_bee_async_rx_enable(const struct device *dev, uint8_t *rx_buf, s
 		return -EBUSY;
 	}
 
-	data->dma_rx.offset = 0;
 	data->dma_rx.buffer = rx_buf;
 	data->dma_rx.buffer_length = buf_size;
-	data->dma_rx.counter = 0;
 	data->dma_rx.timeout = timeout;
 
-	/* Disable RX interrupts to let DMA to handle it */
+	data->rx_next_buffer = 0;
+	data->rx_next_buffer_len = 0;
+
+	/* Disable UART RX AVA interrupts to let DMA to handle it */
 	UART_INTConfig(uart, UART_INT_RD_AVA, DISABLE);
 
 	data->dma_rx.blk_cfg.block_size = buf_size;
-	data->dma_rx.blk_cfg.dest_address = (uint32_t)data->dma_rx.buffer;
+	data->dma_rx.blk_cfg.dest_address = (uint32_t)rx_buf;
 
+	/* Configure the RX DMA with the passed buffer */
 	ret = dma_config(data->dma_rx.dma_dev, data->dma_rx.dma_channel, &data->dma_rx.dma_cfg);
 
 	if (ret != 0) {
@@ -1004,30 +1309,20 @@ static int uart_bee_async_rx_enable(const struct device *dev, uint8_t *rx_buf, s
 		return -EINVAL;
 	}
 
-	/* Enable RX DMA requests */
+	/* Enable the UART RX DMA requests */
 	uart_bee_dma_rx_enable(dev);
 
-	/* Enable UART_INT_RX_IDLE to define the end of a
-	 * RX DMA transaction.
-	 */
+	/* Enable UART_INT_RX_IDLE to define the end of a RX DMA transaction */
 	UART_INTConfig(uart, UART_INT_RX_IDLE, DISABLE);
 	UART_INTConfig(uart, UART_INT_RX_IDLE, ENABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[2] = uart->BEE_UART_REG_DLM_IER;
-	data->store_buf.uart_reg[8] = uart->BEE_UART_REG_RX_TIMEOUT;
-	data->store_buf.uart_reg[9] = uart->BEE_UART_REG_RX_TIMEOUT_EN;
-#endif
+	uart_bee_pm_store_int(dev);
+	uart_bee_pm_store_rx_idle(dev);
 
-	if (dma_start(data->dma_rx.dma_dev, data->dma_rx.dma_channel)) {
-		LOG_ERR("UART ERR: RX DMA start failed!");
-		return -EFAULT;
-	}
+	dma_start(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
 
-	/* Request next buffer */
+	/* Generate RX_BUF_REQUEST event to get the next buffer */
 	async_evt_rx_buf_request(data);
-
-	LOG_DBG("async rx enabled");
 
 	return ret;
 }
@@ -1036,7 +1331,7 @@ static int uart_bee_async_rx_buf_rsp(const struct device *dev, uint8_t *buf, siz
 {
 	struct uart_bee_data *data = dev->data;
 
-	LOG_DBG("[%s] buf=0x%p len=%d", __func__, buf, len);
+	LOG_DBG("buf=0x%p len=%d", buf, len);
 
 	data->rx_next_buffer = buf;
 	data->rx_next_buffer_len = len;
@@ -1049,46 +1344,56 @@ static int uart_bee_async_rx_disable(const struct device *dev)
 	const struct uart_bee_config *config = dev->config;
 	struct uart_bee_data *data = dev->data;
 	UART_TypeDef *uart = config->uart;
-	struct uart_event disabled_event = {.type = UART_RX_DISABLED};
+	struct dma_status stat;
 
-	LOG_DBG("[%s]", __func__);
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+	/* Stop the RX path from raising a PCK-600 active request of its own */
+	UART_TxOnlyModeCmd(uart, ENABLE);
+#endif
+
+	uart_bee_wakeup_pin_config(dev, false);
+
+	uart_bee_keep_alive_stop(dev);
+
+	uart_bee_pm_put(dev, &data->pm_rx_held);
 
 	if (!data->dma_rx.enabled) {
-		async_user_callback(data, &disabled_event);
+		async_evt_rx_disable(data);
 		return -EFAULT;
 	}
 
 	UART_INTConfig(uart, UART_INT_RX_IDLE, DISABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	data->store_buf.uart_reg[8] = uart->BEE_UART_REG_RX_TIMEOUT;
-	data->store_buf.uart_reg[9] = uart->BEE_UART_REG_RX_TIMEOUT_EN;
-#endif
+	uart_bee_pm_store_rx_idle(dev);
 
-	/* uart_bee_dma_rx_flush(dev);*/
-
-	async_evt_rx_buf_release(data);
-
-	dma_stop(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
-
+	/* Disable the UART RX DMA requests */
 	uart_bee_dma_rx_disable(dev);
 
-	(void)k_work_cancel_delayable(&data->dma_rx.timeout_work);
-
-	if (data->rx_next_buffer) {
-		struct uart_event rx_next_buf_release_evt = {
-			.type = UART_RX_BUF_RELEASED,
-			.data.rx_buf.buf = data->rx_next_buffer,
-		};
-		async_user_callback(data, &rx_next_buf_release_evt);
+	/* Get the received DMA length before stopping the RX DMA */
+	if (!dma_get_status(data->dma_rx.dma_dev, data->dma_rx.dma_channel, &stat)) {
+		data->dma_rx.counter = data->dma_rx.buffer_length - stat.pending_length;
 	}
 
-	data->rx_next_buffer = NULL;
-	data->rx_next_buffer_len = 0;
+	/* Stop the RX DMA */
+	dma_stop(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
 
-	LOG_DBG("rx: disabled");
+	/* Stop the RX timeout timer */
+	(void)k_work_cancel_delayable(&data->dma_rx.timeout_work);
 
-	async_user_callback(data, &disabled_event);
+	/* Generate RX_RDY event with the received data */
+	async_evt_rx_rdy(data);
+
+	/* Generate RX_BUF_RELEASED event to release every passed buffer */
+	while (data->dma_rx.buffer) {
+		async_evt_rx_buf_release(data);
+		data->dma_rx.buffer = data->rx_next_buffer;
+		data->dma_rx.buffer_length = 0;
+		data->rx_next_buffer = NULL;
+		data->rx_next_buffer_len = 0;
+	}
+
+	/* Generate RX_DISABLED event when RX is disabled */
+	async_evt_rx_disable(data);
 
 	return 0;
 }
@@ -1101,11 +1406,7 @@ static void uart_bee_async_tx_timeout(struct k_work *work)
 	struct uart_bee_data *data = CONTAINER_OF(tx_stream, struct uart_bee_data, dma_tx);
 	const struct device *dev = data->dev;
 
-	LOG_DBG("[%s]", __func__);
-
 	uart_bee_async_tx_abort(dev);
-
-	LOG_DBG("tx: async timeout");
 }
 
 static void uart_bee_async_rx_timeout(struct k_work *work)
@@ -1116,16 +1417,16 @@ static void uart_bee_async_rx_timeout(struct k_work *work)
 	struct uart_bee_data *data = CONTAINER_OF(rx_stream, struct uart_bee_data, dma_rx);
 	const struct device *dev = data->dev;
 
-	LOG_DBG("[%s] data->dma_rx.counter=%d, "
-		   "data->dma_rx.buffer_length=%d",
-		   __func__, data->dma_rx.counter, data->dma_rx.buffer_length);
-	if (data->dma_rx.counter == data->dma_rx.buffer_length) {
-		uart_bee_async_rx_disable(dev);
-	} else {
-		uart_bee_dma_rx_flush(dev);
+	/* Get the DMA RX length */
+	uart_bee_dma_rx_calc_counter(data);
+
+	if (data->dma_rx.counter) {
+		/* Reload buffer or disable RX */
+		uart_bee_rx_proceed_next_or_disable(dev);
 	}
-#ifdef CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-	data->uart_pm_check_state_idle = BEE_PM_CHECK_PASS;
+
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+	data->pm_check_state_idle = BEE_PM_CHECK_PASS;
 #endif
 }
 
@@ -1134,8 +1435,6 @@ static int uart_bee_async_init(const struct device *dev)
 	const struct uart_bee_config *config = dev->config;
 	struct uart_bee_data *data = dev->data;
 	UART_TypeDef *uart = config->uart;
-
-	LOG_DBG("[%s]", __func__);
 
 	data->dev = dev;
 
@@ -1155,28 +1454,52 @@ static int uart_bee_async_init(const struct device *dev)
 		return 0;
 	}
 
-	atomic_set_bit(((struct dma_context *)data->dma_rx.dma_dev->data)->atomic,
-		       data->dma_rx.dma_channel);
-	atomic_set_bit(((struct dma_context *)data->dma_tx.dma_dev->data)->atomic,
-		       data->dma_tx.dma_channel);
+	/*
+	 * Claim the devicetree-assigned channels through the DMA controller's
+	 * allocation bitmap so that dma_request_channel() (e.g. a memory-to-memory
+	 * user on the same controller) can never hand them out again. Using a
+	 * BIT(channel) filter forces exactly the DT channel and fails loudly if it
+	 * is already taken.
+	 */
+	if (data->dma_rx.dma_dev != NULL) {
+		uint32_t ch_filter = BIT(data->dma_rx.dma_channel);
+		int ch = dma_request_channel(data->dma_rx.dma_dev, &ch_filter);
 
-	/* Disable both TX and RX DMA requests */
+		if (ch < 0) {
+			LOG_ERR("UART RX DMA channel %u already in use",
+				data->dma_rx.dma_channel);
+			return ch;
+		}
+	}
+
+	if (data->dma_tx.dma_dev != NULL) {
+		uint32_t ch_filter = BIT(data->dma_tx.dma_channel);
+		int ch = dma_request_channel(data->dma_tx.dma_dev, &ch_filter);
+
+		if (ch < 0) {
+			LOG_ERR("UART TX DMA channel %u already in use",
+				data->dma_tx.dma_channel);
+			return ch;
+		}
+	}
+
+	/* Disable both UART TX and UART RX DMA requests */
 	uart_bee_dma_rx_disable(dev);
 	uart_bee_dma_tx_disable(dev);
 
 	k_work_init_delayable(&data->dma_rx.timeout_work, uart_bee_async_rx_timeout);
 	k_work_init_delayable(&data->dma_tx.timeout_work, uart_bee_async_tx_timeout);
 
-	/* Configure dma rx config */
+	/* Configure DMA RX config */
 	memset(&data->dma_rx.blk_cfg, 0, sizeof(data->dma_rx.blk_cfg));
 
 	data->dma_rx.blk_cfg.source_address = UART_RX_FIFO_ADDR(uart);
-
 	data->dma_rx.blk_cfg.dest_address = 0; /* dest not ready */
+
 	data->dma_rx.blk_cfg.source_addr_adj = data->dma_rx.src_addr_increment;
 	data->dma_rx.blk_cfg.dest_addr_adj = data->dma_rx.dst_addr_increment;
 
-	/* RX disable circular buffer */
+	/* Disable the RX circular buffer */
 	data->dma_rx.blk_cfg.source_reload_en = 0;
 	data->dma_rx.blk_cfg.dest_reload_en = 0;
 
@@ -1185,15 +1508,13 @@ static int uart_bee_async_init(const struct device *dev)
 	data->rx_next_buffer = NULL;
 	data->rx_next_buffer_len = 0;
 
-	/* Configure dma tx config */
+	/* Configure DMA TX config */
 	memset(&data->dma_tx.blk_cfg, 0, sizeof(data->dma_tx.blk_cfg));
 
 	data->dma_tx.blk_cfg.dest_address = UART_TX_FIFO_ADDR(uart);
-
 	data->dma_tx.blk_cfg.source_address = 0; /* not ready */
 
 	data->dma_tx.blk_cfg.source_addr_adj = data->dma_tx.src_addr_increment;
-
 	data->dma_tx.blk_cfg.dest_addr_adj = data->dma_tx.dst_addr_increment;
 
 	data->dma_tx.dma_cfg.head_block = &data->dma_tx.blk_cfg;
@@ -1206,6 +1527,30 @@ static int uart_bee_async_init(const struct device *dev)
 
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN) || defined(CONFIG_UART_ASYNC_API)
 
+#ifdef CONFIG_UART_ASYNC_API
+static void uart_bee_handle_async_rx_idle(const struct device *dev)
+{
+	struct uart_bee_data *data = dev->data;
+
+	if (!data->dma_rx.dma_dev) {
+		return;
+	}
+
+	/* Get the DMA RX length */
+	uart_bee_dma_rx_calc_counter(data);
+
+	if (data->dma_rx.counter) {
+		if (data->dma_rx.timeout == 0) {
+			/* Reload buffer or disable RX */
+			uart_bee_rx_proceed_next_or_disable(dev);
+		} else {
+			/* Start the RX timeout timer */
+			async_timer_start(&data->dma_rx.timeout_work, data->dma_rx.timeout);
+		}
+	}
+}
+#endif
+
 static void uart_bee_isr(const struct device *dev)
 {
 	struct uart_bee_data *data = dev->data;
@@ -1213,40 +1558,25 @@ static void uart_bee_isr(const struct device *dev)
 	UART_TypeDef *uart = config->uart;
 
 	UART_GetIID(uart);
+#ifdef CONFIG_UART_INTERRUPT_DRIVEN
 	if (data->user_cb) {
 		data->user_cb(dev, data->user_data);
 	}
+#endif
 
 	if (UART_GetFlagStatus(uart, UART_FLAG_RX_IDLE)) {
+		UART_INTConfig(uart, UART_INT_RX_IDLE, DISABLE);
+		UART_INTConfig(uart, UART_INT_RX_IDLE, ENABLE);
+
+		/* The RX path has to stay powered until the frame is consumed */
+		uart_bee_keep_alive_start(dev);
+
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+		data->pm_check_state_idle = BEE_PM_CHECK_PASS;
+#endif
 #ifdef CONFIG_UART_ASYNC_API
-		if (data->dma_rx.dma_dev) {
-			if (data->dma_rx.timeout == 0) {
-				LOG_DBG("[%s] UART_FLAG_RX_IDLE timeout == 0", __func__);
-				uart_bee_dma_rx_flush(dev);
-			} else {
-				extern GDMA_ChannelTypeDef *GDMA_GetGDMAChannelx(
-					uint8_t GDMA_ChannelNum);
-
-				dma_suspend(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
-				LOG_DBG("[%s] dma len=%d", __func__,
-					   GDMA_GetTransferLen(
-						   GDMA_GetGDMAChannelx(data->dma_rx.dma_channel)));
-				dma_resume(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
-
-				/* Start the RX timer not null */
-				UART_INTConfig(uart, UART_INT_RX_IDLE, DISABLE);
-				UART_INTConfig(uart, UART_INT_RX_IDLE, ENABLE);
-				async_timer_start(&data->dma_rx.timeout_work, data->dma_rx.timeout);
-			}
-		} else
+		uart_bee_handle_async_rx_idle(dev);
 #endif
-		{
-			UART_INTConfig(uart, UART_INT_RX_IDLE, DISABLE);
-			UART_INTConfig(uart, UART_INT_RX_IDLE, ENABLE);
-#ifdef CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-			data->uart_pm_check_state_idle = BEE_PM_CHECK_PASS;
-#endif
-		}
 	}
 
 #ifdef CONFIG_UART_ASYNC_API
@@ -1256,94 +1586,99 @@ static void uart_bee_isr(const struct device *dev)
 }
 #endif /* CONFIG_UART_INTERRUPT_DRIVEN || CONFIG_UART_ASYNC_API */
 
-#ifdef CONFIG_PM_DEVICE
-
-#if CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-static BEE_PM_CHECK_RET uart_pm_check(void)
-{
-	BEE_PM_CHECK_RET ret = BEE_PM_CHECK_FAIL;
-	struct uart_bee_data *data;
-
-	if (uart_pm_check_state_timeout == BEE_PM_CHECK_PASS) {
-		for (int i = 0; i < ARRAY_SIZE(devices); i++) {
-			data = (struct uart_bee_data *)(devices[i]->data);
-			if (data->uart_pm_check_state_idle == BEE_PM_CHECK_FAIL) {
-				goto check_ret;
-			}
-		}
-		ret = BEE_PM_CHECK_PASS;
-	}
-check_ret:
-	return ret;
-}
-
-static void uart_register_dlps_cb(void)
-{
-	platform_pm_register_callback_func_with_priority((void *)uart_pm_check, PLATFORM_PM_CHECK,
-							 1);
-}
-
-static void uart_rx_wakeup_timer_cb(struct k_timer *timer)
-{
-	k_timer_stop(&uart_rx_wakeup_timer);
-	uart_pm_check_state_timeout = BEE_PM_CHECK_PASS;
-}
-#endif
-
-static int uart_bee_pm_action(const struct device *dev, enum pm_device_action action)
+static int uart_bee_init(const struct device *dev)
 {
 	const struct uart_bee_config *config = dev->config;
 	struct uart_bee_data *data = dev->data;
-	UART_TypeDef *uart = config->uart;
 	int err;
 
-	switch (action) {
-	case PM_DEVICE_ACTION_SUSPEND:
-		/* Move pins to sleep state */
-		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
-		if ((err < 0) && (err != -ENOENT)) {
-			return err;
-		}
-		break;
-	case PM_DEVICE_ACTION_RESUME:
-#if CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
+	data->dev = dev;
+
+	/* Configure pinmux  */
+	err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
+	if (err < 0) {
+		return err;
+	}
+
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600) && defined(CONFIG_PM_DEVICE)
+	/* Arm the sleep configuration, which the hardware switches to on its own
+	 * once the clock is gated. The pads stay in their active configuration.
+	 */
+	err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+	if ((err < 0) && (err != -ENOENT)) {
+		return err;
+	}
+#endif
+
+#if defined(BEE_UART_PM_WAKEUP)
+	/* A pad wakeup needs both a wakeup-source device and a pin configured
+	 * for wakeup in its sleep state, so find the pin and check both.
+	 */
+	{
 		const struct pinctrl_state *state;
+		const pinctrl_soc_pin_t *wakeup_pin = NULL;
 
 		err = pinctrl_lookup_state(config->pcfg, PINCTRL_STATE_SLEEP, &state);
 		if (err == 0) {
-			for (uint8_t i = 0U; i < state->pin_cnt; i++) {
-				if (state->pins[i].wakeup_low &&
-				    System_WakeUpInterruptValue(state->pins[i].pin)) {
-					uart_pm_check_state_timeout = BEE_PM_CHECK_FAIL;
-					k_timer_start(
-						&uart_rx_wakeup_timer,
-						K_MSEC(CONFIG_UART_BEE_KEEP_ACTIVE_TIMEOUT_MSEC),
-						K_FOREVER);
+			for (uint8_t i = 0; i < state->pin_cnt; i++) {
+				if (state->pins[i].wakeup_low || state->pins[i].wakeup_high) {
+					wakeup_pin = &state->pins[i];
+					break;
 				}
 			}
 		}
+
+		if (pm_device_wakeup_is_capable(dev) && (wakeup_pin != NULL)) {
+			data->has_wakeup_pin = true;
+			data->wakeup_pin = *wakeup_pin;
+#if defined(BEE_UART_PM_WAKEUP_PAD_CB)
+			k_timer_init(&data->timer, uart_bee_rx_wakeup_timer_cb, NULL);
+			data->timer.user_data = (void *)dev;
+			System_RegisterPadWakeupCallback(data->wakeup_pin.pin,
+							 (P_PAD_CBACK)uart_bee_process_pad_wakeup_cb,
+							 (uint32_t)dev);
 #endif
-		/* Set pins to active state */
-		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
-		if (err < 0) {
-			return err;
+		} else if (pm_device_wakeup_is_capable(dev)) {
+			LOG_ERR("%s: wakeup-source without a wakeup pin in its sleep state",
+				dev->name);
+		} else if (wakeup_pin != NULL) {
+			LOG_ERR("%s: wakeup pin in its sleep state without wakeup-source",
+				dev->name);
 		}
-
-		(void)clock_control_on(BEE_CLOCK_CONTROLLER,
-				       (clock_control_subsys_t)&config->clkid);
-
-		UART_DLPSExit(uart, &data->store_buf);
-
-		break;
-	default:
-		return -ENOTSUP;
 	}
 
-	return 0;
-}
-#endif /* CONFIG_PM_DEVICE */
+#if defined(BEE_UART_PM_WAKEUP_PM_CHECK)
+	data->pm_check_state_idle = BEE_PM_CHECK_PASS;
+	uart_bee_register_pm_check_cb();
+#endif
+#endif /* BEE_UART_PM_WAKEUP */
 
-static const struct uart_driver_api uart_bee_driver_api = {
+	(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&config->clkid);
+
+	/* Configure peripheral  */
+	err = uart_bee_configure(dev, &data->uart_config);
+	if (err) {
+		return err;
+	}
+
+	uart_bee_wakeup_pin_config(dev, true);
+
+	/* Enable nvic */
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN) || defined(CONFIG_UART_ASYNC_API)
+	config->irq_config_func(dev);
+#endif /* CONFIG_UART_INTERRUPT_DRIVEN || CONFIG_UART_ASYNC_API */
+
+#ifdef CONFIG_UART_ASYNC_API
+	err = uart_bee_async_init(dev);
+	if (err) {
+		return err;
+	}
+#endif
+
+	return pm_device_driver_init(dev, uart_bee_pm_action);
+}
+
+static DEVICE_API(uart, uart_bee_driver_api) = {
 	.poll_in = uart_bee_poll_in,
 	.poll_out = uart_bee_poll_out,
 	.err_check = uart_bee_err_check,
@@ -1387,45 +1722,6 @@ static const struct uart_driver_api uart_bee_driver_api = {
 	.drv_cmd = uart_bee_drv_cmd,
 #endif
 };
-
-static int uart_bee_init(const struct device *dev)
-{
-	const struct uart_bee_config *config = dev->config;
-	struct uart_bee_data *data = dev->data;
-	int err;
-
-	LOG_DBG("[%s]", __func__);
-	data->dev = dev;
-
-	/* Configure pinmux  */
-	err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
-	if (err < 0) {
-		return err;
-	}
-
-	(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&config->clkid);
-
-	/* Configure peripheral  */
-	err = uart_bee_configure(dev, &data->uart_config);
-	if (err) {
-		return err;
-	}
-
-#if CONFIG_UART_BEE_KEEP_ACTIVE_AFTER_RX_WAKEUP
-	data->uart_pm_check_state_idle = BEE_PM_CHECK_PASS;
-	uart_register_dlps_cb();
-#endif
-	/* Enable nvic */
-#if defined(CONFIG_UART_INTERRUPT_DRIVEN) || defined(CONFIG_UART_ASYNC_API)
-	config->irq_config_func(dev);
-#endif /* CONFIG_UART_INTERRUPT_DRIVEN || CONFIG_UART_ASYNC_API */
-
-#ifdef CONFIG_UART_ASYNC_API
-	return uart_bee_async_init(dev);
-#else
-	return 0;
-#endif
-}
 
 #ifdef CONFIG_UART_ASYNC_API
 
@@ -1487,15 +1783,27 @@ static int uart_bee_init(const struct device *dev)
 #define UART_DMA_CHANNEL(index, dir)
 #endif
 
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+/* The PM flow only touches the clock, so it may run under the spinlock an ISR
+ * safe callback holds. Saving and restoring the registers may not.
+ */
+#define BEE_UART_PM_ISR_SAFE PM_DEVICE_ISR_SAFE
+#else
+#define BEE_UART_PM_ISR_SAFE 0
+#endif
+
 #define BEE_UART_INIT(index)                                                                       \
 	BEE_UART_IRQ_HANDLER_DECL(index)                                                           \
                                                                                                    \
 	PINCTRL_DT_INST_DEFINE(index);                                                             \
                                                                                                    \
+	PM_DEVICE_DT_INST_DEFINE(index, uart_bee_pm_action, BEE_UART_PM_ISR_SAFE);                 \
+                                                                                                   \
 	static const struct uart_bee_config uart_bee_cfg_##index = {                               \
 		.uart = (UART_TypeDef *)DT_INST_REG_ADDR(index),                                   \
 		.clkid = DT_INST_CLOCKS_CELL(index, id),                                           \
 		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(index),                                     \
+		.rx_threshold = DT_INST_PROP_OR(index, rx_threshold, 10),                          \
 		.hw_flow_ctrl = DT_INST_PROP_OR(index, flow_ctrl, false),                          \
 		BEE_UART_IRQ_HANDLER_FUNC(index)};                                                 \
                                                                                                    \
@@ -1513,7 +1821,6 @@ static int uart_bee_init(const struct device *dev)
 			},                                                                         \
 		UART_DMA_CHANNEL(index, rx) UART_DMA_CHANNEL(index, tx)};                          \
                                                                                                    \
-	PM_DEVICE_DT_INST_DEFINE(index, uart_bee_pm_action);                                       \
 	DEVICE_DT_INST_DEFINE(index, &uart_bee_init, PM_DEVICE_DT_INST_GET(index),                 \
 			      &uart_bee_data_##index, &uart_bee_cfg_##index, PRE_KERNEL_1,         \
 			      CONFIG_SERIAL_INIT_PRIORITY, &uart_bee_driver_api);                  \

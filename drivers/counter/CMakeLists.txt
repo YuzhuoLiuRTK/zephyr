@@ -50,5 +50,5 @@ zephyr_library_sources_ifdef(CONFIG_COUNTER_SNPS_DW             counter_dw_timer
 zephyr_library_sources_ifdef(CONFIG_COUNTER_SHELL               counter_timer_shell.c)
 zephyr_library_sources_ifdef(CONFIG_COUNTER_TIMER_RPI_PICO      counter_rpi_pico_timer.c)
 zephyr_library_sources_ifdef(CONFIG_COUNTER_NXP_MRT             counter_nxp_mrt.c)
-zephyr_library_sources_ifdef(CONFIG_COUNTER_TIMER_BEE           counter_bee_timer.c)
+zephyr_library_sources_ifdef(CONFIG_COUNTER_BEE_TIMER           counter_bee_timer.c)
 zephyr_library_sources_ifdef(CONFIG_COUNTER_RTC_BEE             counter_bee_rtc.c)

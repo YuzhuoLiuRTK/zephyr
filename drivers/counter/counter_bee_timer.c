@@ -1,10 +1,10 @@
 /*
- * Copyright(c) 2025, Realtek Semiconductor Corporation.
+ * Copyright(c) 2026, Realtek Semiconductor Corporation.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#define DT_DRV_COMPAT realtek_bee_timer
+#define DT_DRV_COMPAT realtek_bee_counter_timer
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/clock_control.h>
@@ -13,48 +13,38 @@
 #include <zephyr/irq.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
-#include <soc.h>
-#include <zephyr/pm/device.h>
-#include <zephyr/pm/policy.h>
 
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-#include <rtl_tim.h>
-#include <rtl_enh_tim.h>
-#include <rtl_rcc.h>
-#elif defined(CONFIG_SOC_SERIES_RTL8752H)
-#include <rtl876x_tim.h>
-#include <rtl876x_enh_tim.h>
-#include <rtl876x_rcc.h>
-#include <rtl876x_nvic.h>
-#include <vector_table.h>
+#include "bee_timer_common.h"
+
+#if defined(BEE_TIMER_PM_STORE)
+#include <zephyr/pm/device.h>
 #endif
 
 LOG_MODULE_REGISTER(counter_bee_timer, CONFIG_COUNTER_LOG_LEVEL);
 
-#ifdef CONFIG_PM_DEVICE
-extern void ENHTIM_DLPSEnter(void *PeriReg, void *StoreBuf);
-extern void ENHTIM_DLPSExit(void *PeriReg, void *StoreBuf);
-extern void TIM_DLPSEnter(void *PeriReg, void *StoreBuf);
-extern void TIM_DLPSExit(void *PeriReg, void *StoreBuf);
+#if defined(CONFIG_SOC_SERIES_RTL8752H)
+#define GET_COUNTER_DEV_FROM_TIMER(timer_label)                                                    \
+	DEVICE_DT_GET_OR_NULL(DT_CHILD(DT_NODELABEL(timer_label), counter))
 #endif
+struct counter_bee_top_data {
+	counter_top_callback_t callback;
+	void *user_data;
+	uint32_t ticks;
+};
 
-struct counter_bee_ch_data {
+struct counter_bee_alarm_data {
 	counter_alarm_callback_t callback;
 	void *user_data;
 };
 
 struct counter_bee_data {
-	counter_top_callback_t top_cb;
-	void *top_user_data;
-	uint32_t guard_period;
+	struct counter_bee_top_data top;
+	struct counter_bee_alarm_data alarm;
 	uint32_t freq;
-#ifdef CONFIG_PM_DEVICE
-	union {
-		TIMStoreReg_Typedef tim_store_buf;
-		ENHTIMStoreReg_Typedef enhtim_store_buf;
-	} store_buf;
+	const struct bee_timer_ops *ops;
+#if defined(BEE_TIMER_PM_STORE)
+	union bee_timer_store_reg store_buf;
 #endif
-	struct counter_bee_ch_data alarm[];
 };
 
 struct counter_bee_config {
@@ -63,6 +53,7 @@ struct counter_bee_config {
 	uint16_t clkid;
 	bool enhanced;
 	uint8_t prescaler;
+	uint8_t clock_div;
 	void (*irq_config)(const struct device *dev);
 #if defined(CONFIG_SOC_SERIES_RTL8752H)
 	void (*shared_irq_config)(const struct device *dev);
@@ -72,96 +63,42 @@ struct counter_bee_config {
 
 static int counter_bee_timer_start(const struct device *dev)
 {
-	LOG_DBG("counter start\n");
 	const struct counter_bee_config *cfg = dev->config;
+	struct counter_bee_data *data = dev->data;
 
-	if (cfg->enhanced) {
-		LOG_DBG("enhed %s, ctrl=%x, current=%x, line%d\n", dev->name,
-			ENHTIM_GetCurrentMAXCNT(cfg->reg),
-			ENHTIM_GetCurrentCount((ENHTIM_TypeDef *)cfg->reg), __LINE__);
-		ENHTIM_Cmd((ENHTIM_TypeDef *)cfg->reg, ENABLE);
-	} else {
-		LOG_DBG("not enhed %s, ctrl=%x, current=%x, line%d\n", dev->name,
-			TIM_GetCurrentControl(cfg->reg),
-			TIM_GetCurrentValue((TIM_TypeDef *)cfg->reg), __LINE__);
-		TIM_Cmd((TIM_TypeDef *)cfg->reg, ENABLE);
-	}
+	data->ops->start(cfg->reg);
 
 	return 0;
 }
 
 static int counter_bee_timer_stop(const struct device *dev)
 {
-	LOG_DBG("counter stop\n");
 	const struct counter_bee_config *cfg = dev->config;
+	struct counter_bee_data *data = dev->data;
 
-	if (cfg->enhanced) {
-		ENHTIM_Cmd((ENHTIM_TypeDef *)cfg->reg, DISABLE);
-	} else {
-		TIM_Cmd((TIM_TypeDef *)cfg->reg, DISABLE);
-	}
+	data->ops->stop(cfg->reg);
 
-	return 0;
-}
-
-static int counter_bee_timer_get_value(const struct device *dev, uint32_t *ticks)
-{
-	const struct counter_bee_config *cfg = dev->config;
-
-	if (cfg->enhanced) {
-		*ticks = ENHTIM_GetCurrentCount((ENHTIM_TypeDef *)cfg->reg);
-	} else {
-		*ticks = TIM_GetCurrentValue((TIM_TypeDef *)cfg->reg);
-	}
-
-	LOG_DBG("ticks=%x\n", *ticks);
 	return 0;
 }
 
 static uint32_t counter_bee_timer_get_top_value(const struct device *dev)
 {
 	const struct counter_bee_config *cfg = dev->config;
-	if (cfg->enhanced) {
-		LOG_DBG("enhed, topvalue=%x\n",
-			ENHTIM_GetCurrentMAXCNT(cfg->reg));
-		return ENHTIM_GetCurrentMAXCNT(cfg->reg);
-	}
-
-	LOG_DBG("not enhed, topvalue=%x\n", TIM_GetCurrentLoadCnt(cfg->reg));
-	return TIM_GetCurrentLoadCnt(cfg->reg);
-}
-
-static int counter_bee_timer_set_alarm(const struct device *dev, uint8_t chan,
-				       const struct counter_alarm_cfg *alarm_cfg)
-{
-	struct counter_bee_data *data = dev->data;
-	struct counter_bee_ch_data *chdata = &data->alarm[chan];
-
-	if (alarm_cfg->ticks > counter_bee_timer_get_top_value(dev)) {
-		return -EINVAL;
-	}
-
-	if (chdata->callback) {
-		return -EBUSY;
-	}
-
-	chdata->callback = alarm_cfg->callback;
-	chdata->user_data = alarm_cfg->user_data;
-
-	LOG_DBG("chan=%d\n", chan);
-	LOG_ERR("Unspported alarm");
-	return -ENOTSUP;
-}
-
-static int counter_bee_timer_cancel_alarm(const struct device *dev, uint8_t chan)
-{
 	struct counter_bee_data *data = dev->data;
 
-	data->alarm[chan].callback = NULL;
+	return data->ops->get_top(cfg->reg);
+}
 
-	LOG_DBG("chan=%d\n", chan);
-	LOG_ERR("Unspported alarm");
-	return -ENOTSUP;
+static int counter_bee_timer_get_value(const struct device *dev, uint32_t *ticks)
+{
+	const struct counter_bee_config *cfg = dev->config;
+	struct counter_bee_data *data = dev->data;
+
+	*ticks = data->ops->get_count(cfg->reg);
+
+	LOG_DBG("%s ticks=%x", dev->name, *ticks);
+
+	return 0;
 }
 
 static int counter_bee_timer_set_top_value(const struct device *dev,
@@ -169,147 +106,175 @@ static int counter_bee_timer_set_top_value(const struct device *dev,
 {
 	const struct counter_bee_config *cfg = dev->config;
 	struct counter_bee_data *data = dev->data;
-	int err = 0;
 
-	for (uint32_t i = 0; i < cfg->counter_info.channels; i++) {
-		/* Top value can be changed only when all channels are
-		 * disabled.
-		 */
-		if (data->alarm[i].callback) {
-			return -EBUSY;
-		}
-	}
-	LOG_DBG("ticks=%x, line%d\n", top_cfg->ticks, __LINE__);
-
-	if (cfg->enhanced) {
-		ENHTIM_INTConfig((ENHTIM_TypeDef *)cfg->reg, ENHTIM_INT_TIM, DISABLE);
-		ENHTIM_SetMaxCount((ENHTIM_TypeDef *)cfg->reg, top_cfg->ticks);
-		ENHTIM_ClearINTPendingBit((ENHTIM_TypeDef *)cfg->reg, ENHTIM_INT_TIM);
-		data->top_cb = top_cfg->callback;
-		data->top_user_data = top_cfg->user_data;
-		if (!(top_cfg->flags & COUNTER_TOP_CFG_DONT_RESET)) {
-			ENHTIM_Cmd((ENHTIM_TypeDef *)cfg->reg, DISABLE);
-			ENHTIM_Cmd((ENHTIM_TypeDef *)cfg->reg, ENABLE);
-		} else if (top_cfg->flags & COUNTER_TOP_CFG_RESET_WHEN_LATE) {
-			ENHTIM_Cmd((ENHTIM_TypeDef *)cfg->reg, DISABLE);
-			ENHTIM_Cmd((ENHTIM_TypeDef *)cfg->reg, ENABLE);
-		}
-
-		if (top_cfg->callback) {
-			ENHTIM_INTConfig((ENHTIM_TypeDef *)cfg->reg, ENHTIM_INT_TIM, ENABLE);
-		}
-	} else {
-		TIM_INTConfig((TIM_TypeDef *)cfg->reg, DISABLE);
-		TIM_ChangePeriod((TIM_TypeDef *)cfg->reg, top_cfg->ticks);
-		TIM_ClearINT((TIM_TypeDef *)cfg->reg);
-		data->top_cb = top_cfg->callback;
-		data->top_user_data = top_cfg->user_data;
-		if (!(top_cfg->flags & COUNTER_TOP_CFG_DONT_RESET)) {
-			TIM_Cmd((TIM_TypeDef *)cfg->reg, DISABLE);
-			TIM_Cmd((TIM_TypeDef *)cfg->reg, ENABLE);
-		} else if (top_cfg->flags & COUNTER_TOP_CFG_RESET_WHEN_LATE) {
-			TIM_Cmd((TIM_TypeDef *)cfg->reg, DISABLE);
-			TIM_Cmd((TIM_TypeDef *)cfg->reg, ENABLE);
-		}
-
-		if (top_cfg->callback) {
-			TIM_INTConfig((TIM_TypeDef *)cfg->reg, ENABLE);
-		}
+	if (top_cfg == NULL) {
+		LOG_ERR("There is no top_cfg");
+		return -EINVAL;
 	}
 
-	return err;
+	if (top_cfg->flags & COUNTER_TOP_CFG_DONT_RESET) {
+		LOG_ERR("Unsupport setting top value without resetting counter");
+		return -ENOTSUP;
+	}
+
+	if (data->alarm.callback) {
+		LOG_ERR("Alarm is active");
+		return -EBUSY;
+	}
+
+	if (top_cfg->ticks <= 1) {
+		LOG_ERR("Top ticks too short");
+		return -EBUSY;
+	}
+
+	data->ops->stop(cfg->reg);
+	data->ops->int_disable(cfg->reg);
+	data->ops->set_top(cfg->reg, top_cfg->ticks);
+	data->ops->int_clear(cfg->reg);
+
+	data->top.callback = top_cfg->callback;
+	data->top.user_data = top_cfg->user_data;
+	data->top.ticks = top_cfg->ticks;
+
+	if (top_cfg->callback) {
+		data->ops->int_enable(cfg->reg);
+	}
+
+	data->ops->start(cfg->reg);
+
+	return 0;
+}
+
+static int counter_bee_timer_set_alarm(const struct device *dev, uint8_t chan,
+				       const struct counter_alarm_cfg *alarm_cfg)
+{
+	ARG_UNUSED(chan);
+
+	const struct counter_bee_config *cfg = dev->config;
+	struct counter_bee_data *data = dev->data;
+
+	if (alarm_cfg == NULL) {
+		LOG_ERR("There is no alarm_cfg");
+		return -EINVAL;
+	}
+
+	if (!alarm_cfg->callback) {
+		LOG_ERR("There is no alarm callback");
+		return -EINVAL;
+	}
+
+	if (alarm_cfg->flags & COUNTER_ALARM_CFG_ABSOLUTE) {
+		LOG_ERR("Unsupport absolute alarm");
+		return -ENOTSUP;
+	}
+
+	if (data->alarm.callback) {
+		LOG_ERR("Alarm is already active");
+		return -EBUSY;
+	}
+
+	if (alarm_cfg->ticks > data->top.ticks) {
+		LOG_ERR("Alarm ticks exceed top ticks");
+		return -EINVAL;
+	}
+
+	if (alarm_cfg->ticks <= 1) {
+		LOG_ERR("Alarm ticks too short");
+		return -EINVAL;
+	}
+
+	data->ops->stop(cfg->reg);
+	data->ops->set_top(cfg->reg, alarm_cfg->ticks);
+	data->ops->int_disable(cfg->reg);
+	data->ops->int_clear(cfg->reg);
+
+	data->alarm.callback = alarm_cfg->callback;
+	data->alarm.user_data = alarm_cfg->user_data;
+
+	data->ops->int_enable(cfg->reg);
+	data->ops->start(cfg->reg);
+
+	return 0;
+}
+
+static int counter_bee_timer_cancel_alarm(const struct device *dev, uint8_t chan)
+{
+	ARG_UNUSED(chan);
+
+	const struct counter_bee_config *cfg = dev->config;
+	struct counter_bee_data *data = dev->data;
+
+	data->alarm.callback = NULL;
+	data->alarm.user_data = NULL;
+
+	data->ops->stop(cfg->reg);
+
+	return 0;
 }
 
 static uint32_t counter_bee_timer_get_pending_int(const struct device *dev)
 {
-	LOG_DBG("get pending\n");
-
 	const struct counter_bee_config *cfg = dev->config;
+
 	return cfg->get_irq_pending();
 }
 
 static uint32_t counter_bee_timer_get_freq(const struct device *dev)
 {
 	struct counter_bee_data *data = dev->data;
-	LOG_DBG("freq=%d\n", data->freq);
 
 	return data->freq;
 }
 
-static uint32_t counter_bee_timer_get_guard_period(const struct device *dev, uint32_t flags)
+static int counter_bee_timer_init(const struct device *dev)
 {
-	LOG_DBG("get guard period\n");
-
+	const struct counter_bee_config *cfg = dev->config;
 	struct counter_bee_data *data = dev->data;
+	uint32_t pclk = 40000000;
 
-	return data->guard_period;
-}
+	data->ops = bee_timer_get_ops(cfg->enhanced);
+	if (!data->ops) {
+		LOG_ERR("Bee timer HAL not enabled");
+		return -ENOTSUP;
+	}
 
-static int counter_bee_timer_set_guard_period(const struct device *dev, uint32_t guard,
-					      uint32_t flags)
-{
-	LOG_DBG("guard=%d\n", guard);
-	struct counter_bee_data *data = dev->data;
+	(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&cfg->clkid);
 
-	__ASSERT_NO_MSG(guard < counter_bee_timer_get_top_value(dev));
+#if defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL87X2J)
+	cfg->irq_config(dev);
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+	if (dev == GET_COUNTER_DEV_FROM_TIMER(timer4) ||
+	    dev == GET_COUNTER_DEV_FROM_TIMER(timer5)) {
+		cfg->shared_irq_config(dev);
+	} else {
+		cfg->irq_config(dev);
+	}
+#endif
 
-	data->guard_period = guard;
+	data->freq = pclk / cfg->prescaler;
+	data->top.ticks = cfg->counter_info.max_top_value;
+
+	data->ops->init(cfg->reg, cfg->clock_div, cfg->counter_info.max_top_value,
+			BEE_TIMER_MODE_COUNTER);
+
+#if defined(BEE_TIMER_PM_STORE)
+	data->ops->pm_store(cfg->reg, &data->store_buf);
+#endif
+
 	return 0;
 }
 
-static void top_irq_handle(const struct device *dev)
-{
-	struct counter_bee_data *data = dev->data;
-	counter_top_callback_t cb = data->top_cb;
-	const struct counter_bee_config *cfg = dev->config;
-	if (cfg->enhanced) {
-		if (ENHTIM_GetINTStatus((ENHTIM_TypeDef *)cfg->reg, ENHTIM_INT_TIM)) {
-			ENHTIM_ClearINTPendingBit((ENHTIM_TypeDef *)cfg->reg, ENHTIM_INT_TIM);
-			__ASSERT(cb != NULL, "top event enabled - expecting callback");
-			cb(dev, data->top_user_data);
-		}
-	} else {
-		if (TIM_GetINTStatus((TIM_TypeDef *)cfg->reg)) {
-			TIM_ClearINT((TIM_TypeDef *)cfg->reg);
-			__ASSERT(cb != NULL, "top event enabled - expecting callback");
-			cb(dev, data->top_user_data);
-		}
-	}
-}
-
-static void alarm_irq_handle(const struct device *dev, uint32_t chan)
-{
-	LOG_DBG("chan=%d\n", chan);
-	struct counter_bee_data *data = dev->data;
-	struct counter_bee_ch_data *alarm = &data->alarm[chan];
-	counter_alarm_callback_t cb;
-	uint32_t ticks;
-	counter_bee_timer_get_value(dev, &ticks);
-	cb = alarm->callback;
-	alarm->callback = NULL;
-
-	if (cb) {
-		cb(dev, chan, ticks, alarm->user_data);
-	}
-}
-
-#ifdef CONFIG_PM_DEVICE
+#if defined(BEE_TIMER_PM_STORE)
 static int counter_bee_timer_pm_action(const struct device *dev, enum pm_device_action action)
 {
 	const struct counter_bee_config *cfg = dev->config;
 	struct counter_bee_data *data = dev->data;
-	void *timer_base = (void *)cfg->reg;
 
 	switch (action) {
 	case PM_DEVICE_ACTION_SUSPEND:
 		break;
 	case PM_DEVICE_ACTION_RESUME:
-		if (cfg->enhanced) {
-			ENHTIM_DLPSExit(timer_base, &data->store_buf);
-		} else {
-			TIM_DLPSExit(timer_base, &data->store_buf);
-		}
-
+		data->ops->pm_restore(cfg->reg, &data->store_buf);
 		break;
 	default:
 		return -ENOTSUP;
@@ -317,15 +282,26 @@ static int counter_bee_timer_pm_action(const struct device *dev, enum pm_device_
 
 	return 0;
 }
-#endif /* CONFIG_PM_DEVICE */
+#endif /* BEE_TIMER_PM_STORE */
 
 static void irq_handler(const struct device *dev)
 {
+	struct counter_bee_data *data = dev->data;
 	const struct counter_bee_config *cfg = dev->config;
-	top_irq_handle(dev);
 
-	for (uint32_t i = 0; i < cfg->counter_info.channels; i++) {
-		alarm_irq_handle(dev, i);
+	data->ops->int_clear(cfg->reg);
+
+	if (data->top.callback) {
+		data->top.callback(dev, data->top.user_data);
+	}
+
+	if (data->alarm.callback) {
+		uint32_t ticks;
+		counter_alarm_callback_t cb = data->alarm.callback;
+
+		counter_bee_timer_get_value(dev, &ticks);
+		data->alarm.callback = NULL;
+		cb(dev, 0, ticks, data->alarm.user_data);
 	}
 }
 
@@ -333,170 +309,67 @@ static void irq_handler(const struct device *dev)
 static void shared_irq_handler(void)
 {
 	const struct device *dev;
+	struct counter_bee_data *data;
+	const struct counter_bee_config *cfg;
 
-	if (TIM4->IntStatus) {
-		dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(timer4));
+	dev = GET_COUNTER_DEV_FROM_TIMER(timer4);
+	if (dev && device_is_ready(dev)) {
+		data = dev->data;
+		cfg = dev->config;
+		if (data->ops->int_status(cfg->reg)) {
+			irq_handler(dev);
+		}
 	}
 
-	if (TIM5->IntStatus) {
-		dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(timer5));
+	dev = GET_COUNTER_DEV_FROM_TIMER(timer5);
+	if (dev && device_is_ready(dev)) {
+		data = dev->data;
+		cfg = dev->config;
+		if (data->ops->int_status(cfg->reg)) {
+			irq_handler(dev);
+		}
 	}
-
-	irq_handler(dev);
 }
 #endif
 
-static int counter_bee_timer_init(const struct device *dev)
-{
-	const struct counter_bee_config *cfg = dev->config;
-	struct counter_bee_data *data = dev->data;
-	void *timer_base = (void *)cfg->reg;
-	uint8_t clock_div;
-
-	uint32_t pclk = 40000000;
-
-	(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&cfg->clkid);
-
-	data->freq = pclk / cfg->prescaler;
-
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-	cfg->irq_config(dev);
-#elif defined(CONFIG_SOC_SERIES_RTL8752H)
-	if (dev == DEVICE_DT_GET_OR_NULL(DT_NODELABEL(timer4)) ||
-	    dev == DEVICE_DT_GET_OR_NULL(DT_NODELABEL(timer5))) {
-		cfg->shared_irq_config(dev);
-	} else {
-		cfg->irq_config(dev);
-	}
-#endif
-
-	switch (cfg->prescaler) {
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-	case 1:
-		clock_div = CLOCK_DIV_1;
-		break;
-	case 2:
-		clock_div = CLOCK_DIV_2;
-		break;
-	case 4:
-		clock_div = CLOCK_DIV_4;
-		break;
-	case 8:
-		clock_div = CLOCK_DIV_8;
-		break;
-	case 16:
-		clock_div = CLOCK_DIV_16;
-		break;
-	case 32:
-		clock_div = CLOCK_DIV_32;
-		break;
-	case 40:
-		clock_div = CLOCK_DIV_40;
-		break;
-	case 64:
-		clock_div = CLOCK_DIV_64;
-		break;
-	default:
-		clock_div = CLOCK_DIV_1;
-		break;
-#elif defined(CONFIG_SOC_SERIES_RTL8752H)
-	case 1:
-		clock_div = TIM_CLOCK_DIVIDER_1;
-		break;
-	case 2:
-		clock_div = TIM_CLOCK_DIVIDER_2;
-		break;
-	case 4:
-		clock_div = TIM_CLOCK_DIVIDER_4;
-		break;
-	case 8:
-		clock_div = TIM_CLOCK_DIVIDER_8;
-		break;
-	case 40:
-		clock_div = TIM_CLOCK_DIVIDER_40;
-		break;
-	case 125:
-		clock_div = TIM_CLOCK_DIVIDER_125;
-		break;
-	default:
-		clock_div = TIM_CLOCK_DIVIDER_1;
-		break;
-#endif
-	}
-
-	if (cfg->enhanced) {
-		ENHTIM_InitTypeDef enh_tim_init_struct;
-		ENHTIM_StructInit(&enh_tim_init_struct);
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-		enh_tim_init_struct.ENHTIM_ClockSource = CK_40M_TIMER;
-		enh_tim_init_struct.ENHTIM_ClockDiv_En = ENABLE;
-#endif
-		enh_tim_init_struct.ENHTIM_ClockDiv = clock_div;
-		enh_tim_init_struct.ENHTIM_Mode = ENHTIM_MODE_PWM_MANUAL;
-		enh_tim_init_struct.ENHTIM_MaxCount = cfg->counter_info.max_top_value;
-		ENHTIM_Init((ENHTIM_TypeDef *)timer_base, &enh_tim_init_struct);
-		LOG_DBG("enhed %s, ctrl=%x, line%d\n", dev->name,
-			ENHTIM_GetCurrentControl(timer_base), __LINE__);
-#ifdef CONFIG_PM_DEVICE
-		ENHTIM_DLPSEnter(timer_base, &data->store_buf);
-#endif
-	} else {
-		TIM_TimeBaseInitTypeDef timer_init_struct;
-		TIM_StructInit(&timer_init_struct);
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-		timer_init_struct.TIM_ClockSrc = CK_40M_TIMER;
-		timer_init_struct.TIM_SOURCE_DIV_En = ENABLE;
-#endif
-		timer_init_struct.TIM_SOURCE_DIV = clock_div;
-		timer_init_struct.TIM_Mode = TIM_Mode_UserDefine;
-		timer_init_struct.TIM_Period = cfg->counter_info.max_top_value;
-		TIM_TimeBaseInit((TIM_TypeDef *)timer_base, &timer_init_struct);
-		LOG_DBG("not enhed %s, ctrl=%x, line%d\n", dev->name,
-			TIM_GetCurrentControl(timer_base), __LINE__);
-#ifdef CONFIG_PM_DEVICE
-		TIM_DLPSEnter(timer_base, &data->store_buf);
-#endif
-	}
-
-	return 0;
-}
-
-static const struct counter_driver_api counter_bee_timer_driver_api = {
+static DEVICE_API(counter, counter_bee_timer_driver_api) = {
 	.start = counter_bee_timer_start,
 	.stop = counter_bee_timer_stop,
 	.get_value = counter_bee_timer_get_value,
+	.set_top_value = counter_bee_timer_set_top_value,
+	.get_top_value = counter_bee_timer_get_top_value,
 	.set_alarm = counter_bee_timer_set_alarm,
 	.cancel_alarm = counter_bee_timer_cancel_alarm,
-	.set_top_value = counter_bee_timer_set_top_value,
-	.get_pending_int = counter_bee_timer_get_pending_int,
-	.get_top_value = counter_bee_timer_get_top_value,
-	.get_guard_period = counter_bee_timer_get_guard_period,
-	.set_guard_period = counter_bee_timer_set_guard_period,
 	.get_freq = counter_bee_timer_get_freq,
+	.get_pending_int = counter_bee_timer_get_pending_int,
 };
 
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+#define PARENT_NODE(n) DT_INST_PARENT(n)
+
+#if defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL87X2J)
 #define TIMER_IRQ_HANDLER(index)                                                                   \
 	static void irq_config_##index(const struct device *dev)                                   \
 	{                                                                                          \
-		IRQ_CONNECT(DT_INST_IRQN(index), DT_INST_IRQ(index, priority), irq_handler,        \
-			    DEVICE_DT_INST_GET(index), 0);                                         \
-		irq_enable(DT_INST_IRQN(index));                                                   \
+		IRQ_CONNECT(DT_IRQN(PARENT_NODE(index)), DT_IRQ(PARENT_NODE(index), priority),     \
+			    irq_handler, DEVICE_DT_INST_GET(index), 0);                            \
+		irq_enable(DT_IRQN(PARENT_NODE(index)));                                           \
 	}
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 #define TIMER_IRQ_HANDLER(index)                                                                   \
 	static void irq_config_##index(const struct device *dev)                                   \
 	{                                                                                          \
-		irq_connect_dynamic(DT_INST_IRQN(index), DT_INST_IRQ(index, priority),             \
-				    (void *)irq_handler, DEVICE_DT_INST_GET(index), 0);            \
-		irq_enable(DT_INST_IRQN(index));                                                   \
+		irq_connect_dynamic(DT_IRQN(PARENT_NODE(index)),                                   \
+				    DT_IRQ(PARENT_NODE(index), priority), (void *)irq_handler,     \
+				    DEVICE_DT_INST_GET(index), 0);                                 \
+		irq_enable(DT_IRQN(PARENT_NODE(index)));                                           \
 	}                                                                                          \
 	static void shared_irq_config##index(const struct device *dev)                             \
 	{                                                                                          \
-		irq_disable(DT_INST_IRQN(index));                                                  \
-		irq_connect_dynamic(DT_INST_IRQN(index), DT_INST_IRQ(index, priority),             \
+		irq_disable(DT_IRQN(PARENT_NODE(index)));                                          \
+		irq_connect_dynamic(DT_IRQN(PARENT_NODE(index)),                                   \
+				    DT_IRQ(PARENT_NODE(index), priority),                          \
 				    (void *)shared_irq_handler, NULL, 0);                          \
-		irq_enable(DT_INST_IRQN(index));                                                   \
+		irq_enable(DT_IRQN(PARENT_NODE(index)));                                           \
 	}
 #endif
 
@@ -504,42 +377,59 @@ static const struct counter_driver_api counter_bee_timer_driver_api = {
 	TIMER_IRQ_HANDLER(index);                                                                  \
 	static uint32_t get_irq_pending_##index(void)                                              \
 	{                                                                                          \
-		return NVIC_GetPendingIRQ(DT_INST_IRQN(index));                                    \
+		return NVIC_GetPendingIRQ(DT_IRQN(PARENT_NODE(index)));                            \
 	}
 
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
+#define TIMER_DIV_CONFIG(index)                                                                    \
+	.clock_div = CONCAT(CLOCK_DIV_, DT_PROP_OR(PARENT_NODE(index), prescaler, 1))
 #define TIMER_IRQ_CONFIG(index) .irq_config = irq_config_##index
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
+#define TIMER_DIV_CONFIG(index)                                                                    \
+	.clock_div = CONCAT(TIM_CLOCK_DIVIDER_, DT_PROP_OR(PARENT_NODE(index), prescaler, 1))
 #define TIMER_IRQ_CONFIG(index)                                                                    \
 	.irq_config = irq_config_##index, .shared_irq_config = shared_irq_config##index
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#define TIMER_DIV_CONFIG(index)                                                                    \
+	.clock_div = CONCAT(TIMER_CLOCK_DIV_, DT_PROP_OR(PARENT_NODE(index), prescaler, 1))
+#define TIMER_IRQ_CONFIG(index) .irq_config = irq_config_##index
 #endif
 
-#define BEE_TIMER_INIT(index)                                                                      \
+#if defined(BEE_TIMER_PM_STORE)
+#define COUNTER_BEE_TIMER_PM_DEFINE(index)                                                         \
+	PM_DEVICE_DT_INST_DEFINE(index, counter_bee_timer_pm_action);
+#define COUNTER_BEE_TIMER_PM_GET(index) PM_DEVICE_DT_INST_GET(index)
+#else
+#define COUNTER_BEE_TIMER_PM_DEFINE(index)
+#define COUNTER_BEE_TIMER_PM_GET(index) NULL
+#endif
+
+#define BEE_COUNTER_TIMER_INIT(index)                                                              \
 	TIMER_IRQ_CONFIG_FUNC(index);                                                              \
 	static struct timer_data_##index {                                                         \
 		struct counter_bee_data data;                                                      \
-		struct counter_bee_ch_data alarm[DT_INST_PROP(index, channels)];                   \
+		struct counter_bee_alarm_data alarm;                                               \
 	} counter_bee_data_##index = {0};                                                          \
 	static const struct counter_bee_config counter_bee_config_##index = {                      \
 		.counter_info =                                                                    \
 			{                                                                          \
 				.max_top_value = UINT32_MAX,                                       \
 				.flags = 0,                                                        \
-				.freq = 0,                                                         \
-				.channels = DT_INST_PROP(index, channels),                         \
+				.freq = 40000000 / DT_PROP_OR(PARENT_NODE(index), prescaler, 1),   \
+				.channels = 1,                                                     \
 			},                                                                         \
-		.reg = DT_INST_REG_ADDR(index),                                                    \
-		.clkid = DT_INST_CLOCKS_CELL(index, id),                                           \
-		.enhanced = DT_INST_PROP(index, is_enhanced),                                      \
-		.prescaler = DT_INST_PROP(index, prescaler),                                       \
+		.reg = DT_REG_ADDR(PARENT_NODE(index)),                                            \
+		.clkid = DT_CLOCKS_CELL(PARENT_NODE(index), id),                                   \
+		.enhanced = DT_NODE_HAS_COMPAT(PARENT_NODE(index), realtek_bee_enhanced_timer),    \
+		.prescaler = DT_PROP_OR(PARENT_NODE(index), prescaler, 1),                         \
+		TIMER_DIV_CONFIG(index),                                                           \
 		TIMER_IRQ_CONFIG(index),                                                           \
 		.get_irq_pending = get_irq_pending_##index,                                        \
 	};                                                                                         \
                                                                                                    \
-	PM_DEVICE_DT_INST_DEFINE(index, counter_bee_timer_pm_action);                              \
-	DEVICE_DT_INST_DEFINE(index, counter_bee_timer_init, PM_DEVICE_DT_INST_GET(index),         \
-			      &counter_bee_data_##index, &counter_bee_config_##index,              \
-			      PRE_KERNEL_1, CONFIG_COUNTER_INIT_PRIORITY,                          \
-			      &counter_bee_timer_driver_api);
+	COUNTER_BEE_TIMER_PM_DEFINE(index)                                                         \
+	DEVICE_DT_INST_DEFINE(index, counter_bee_timer_init, COUNTER_BEE_TIMER_PM_GET(index),       \
+			      &counter_bee_data_##index, &counter_bee_config_##index, PRE_KERNEL_1, \
+			      CONFIG_COUNTER_INIT_PRIORITY, &counter_bee_timer_driver_api);
 
-DT_INST_FOREACH_STATUS_OKAY(BEE_TIMER_INIT);
+DT_INST_FOREACH_STATUS_OKAY(BEE_COUNTER_TIMER_INIT);

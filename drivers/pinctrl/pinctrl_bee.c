@@ -15,17 +15,25 @@
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 #define bee_pad_set_pull(pin, stre)       Pad_SetPullStrength(pin, stre)
 #define bee_pad_wakeup(pin, pol, en, deb) System_WakeUpPinEnable(pin, pol, en)
+#define BEE_PAD_WAKEUP_ENABLE(pin, pol, en, deb) System_WakeUpPinEnable(pin, pol, en)
+#define BEE_PAD_WAKEUP_DISABLE(pin)              System_WakeUpPinDisable(pin)
 #define BEE_DRIVING_LEVEL0 LEVEL0
 #define BEE_DRIVING_LEVEL1 LEVEL1
 #define BEE_DRIVING_LEVEL2 LEVEL2
 #define BEE_DRIVING_LEVEL3 LEVEL3
+#define BEE_PAD_WAKEUP_HIGH                      PAD_WAKEUP_POL_HIGH
+#define BEE_PAD_WAKEUP_LOW                       PAD_WAKEUP_POL_LOW
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
+#define BEE_PAD_WAKEUP_ENABLE(pin, pol, en, deb) System_WakeUpPinEnable(pin, pol, en, deb)
+#define BEE_PAD_WAKEUP_DISABLE(pin)              System_WakeUpPinDisable(pin)
 #define bee_pad_set_pull(pin, stre)       Pad_PullConfigValue(pin, stre)
 #define bee_pad_wakeup(pin, pol, en, deb) System_WakeUpPinEnable(pin, pol, en, deb)
 #define BEE_DRIVING_LEVEL0 PAD_DRIVING_CURRENT_8_8mA
 #define BEE_DRIVING_LEVEL1 PAD_DRIVING_CURRENT_12_18mA
 #define BEE_DRIVING_LEVEL2 PAD_DRIVING_CURRENT_16_28mA
 #define BEE_DRIVING_LEVEL3 PAD_DRIVING_CURRENT_16_28mA
+#define BEE_PAD_WAKEUP_HIGH                      PAD_WAKEUP_POL_HIGH
+#define BEE_PAD_WAKEUP_LOW                       PAD_WAKEUP_POL_LOW
 #endif
 
 static void pinctrl_configure_pin(const pinctrl_soc_pin_t *pin)
@@ -108,4 +116,54 @@ int pinctrl_configure_pins(const pinctrl_soc_pin_t *pins, uint8_t pin_cnt, uintp
 	}
 
 	return 0;
+}
+
+void pinctrl_bee_wakeup_enable(uint8_t pin, uint8_t polarity, uint8_t type)
+{
+#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+	if (type == PINCTRL_BEE_WAKEUP_PPU) {
+		if (polarity) {
+			System_WakeUpPPUCmd(pin, BEE_PAD_WAKEUP_HIGH, ENABLE);
+		} else {
+			System_WakeUpPPUCmd(pin, BEE_PAD_WAKEUP_LOW, ENABLE);
+		}
+		return;
+	}
+#endif
+	(void)type;
+
+	if (polarity) {
+		BEE_PAD_WAKEUP_ENABLE(pin, BEE_PAD_WAKEUP_HIGH, DISABLE, 0);
+	} else {
+		BEE_PAD_WAKEUP_ENABLE(pin, BEE_PAD_WAKEUP_LOW, DISABLE, 0);
+	}
+}
+
+void pinctrl_bee_wakeup_config(uint8_t pin, uint8_t polarity, uint8_t type, bool enable)
+{
+#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+	if (type == PINCTRL_BEE_WAKEUP_PPU) {
+		if (enable) {
+			if (polarity) {
+				System_WakeUpPPUCmd(pin, BEE_PAD_WAKEUP_HIGH, ENABLE);
+			} else {
+				System_WakeUpPPUCmd(pin, BEE_PAD_WAKEUP_LOW, ENABLE);
+			}
+		} else {
+			System_WakeUpPPUCmd(pin, BEE_PAD_WAKEUP_LOW, DISABLE);
+		}
+		return;
+	}
+#endif
+	(void)type;
+
+	if (enable) {
+		if (polarity) {
+			BEE_PAD_WAKEUP_ENABLE(pin, BEE_PAD_WAKEUP_HIGH, DISABLE, 0);
+		} else {
+			BEE_PAD_WAKEUP_ENABLE(pin, BEE_PAD_WAKEUP_LOW, DISABLE, 0);
+		}
+	} else {
+		BEE_PAD_WAKEUP_DISABLE(pin);
+	}
 }

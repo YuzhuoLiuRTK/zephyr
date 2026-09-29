@@ -1,29 +1,27 @@
 /*
- * Copyright(c) 2025, Realtek Semiconductor Corporation.
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @brief Driver for I2S port on BEE family processor.
- * @note  Please validate for newly added series.
- */
+#define DT_DRV_COMPAT realtek_bee_i2s
 
-#include <errno.h>
-#include <string.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/init.h>
-#include <zephyr/drivers/dma.h>
-#include <zephyr/drivers/i2s.h>
-#include <zephyr/drivers/pinctrl.h>
+#include <zephyr/irq.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/bee_clock_control.h>
-#include <soc.h>
-
-#include <zephyr/drivers/dma/dma_bee.h>
+#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/dma.h>
+#include <zephyr/drivers/dma/dma_bee.h>
+#include <zephyr/drivers/i2s.h>
+
+#include <soc.h>
+#include <errno.h>
+#include <string.h>
+
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 #include <rtl_gdma.h>
 #include <rtl_i2s.h>
@@ -32,12 +30,14 @@
 #include <rtl876x_gdma.h>
 #include <rtl876x_i2s.h>
 #include <rtl876x_pinmux.h>
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#include <rtl_dma.h>
+#include <rtl_i2s.h>
+#include <rtl_pinmux.h>
 #endif
 
 #include <zephyr/logging/log.h>
-#include <zephyr/irq.h>
-
-#include "trace.h"
+LOG_MODULE_REGISTER(i2s_bee, CONFIG_I2S_LOG_LEVEL);
 
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 #define BEE_I2S_TX_CH_L_R    I2S_CH_L_R
@@ -56,6 +56,17 @@
 #define BEE_I2S_RX_FIFO_ADDR I2S_RX_FIFO_RD_ADDR
 
 #define BEE_I2S_WithExtCodecCmd(i2s, cmd) I2S_WithExtCodecCmd(i2s, cmd)
+#define BEE_I2S_Width_8Bits    I2S_Width_8Bits
+#define BEE_I2S_Width_16Bits   I2S_Width_16Bits
+#define BEE_I2S_Width_24Bits   I2S_Width_24Bits
+#define BEE_I2S_Channel_Mono   I2S_Channel_Mono
+#define BEE_I2S_Channel_stereo I2S_Channel_stereo
+#define BEE_I2S_Mode           I2S_Mode
+#define BEE_PCM_Mode_A         PCM_Mode_A
+#define BEE_PCM_Mode_B         PCM_Mode_B
+#define BEE_Left_Justified_Mode Left_Justified_Mode
+#define BEE_I2S_DeviceMode_Master I2S_DeviceMode_Master
+#define BEE_I2S_DeviceMode_Slave  I2S_DeviceMode_Slave
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 #define BEE_I2S_TX_CH_L_R    I2S_TX_CH_L_R
 #define BEE_I2S_TX_CH_R_L    I2S_TX_CH_R_L
@@ -73,11 +84,47 @@
 #define BEE_I2S_RX_FIFO_ADDR RX_DR
 
 #define BEE_I2S_WithExtCodecCmd(i2s, cmd) I2S0_WithExtCodecCmd(cmd)
+#define BEE_I2S_Width_8Bits    I2S_Width_8Bits
+#define BEE_I2S_Width_16Bits   I2S_Width_16Bits
+#define BEE_I2S_Width_24Bits   I2S_Width_24Bits
+#define BEE_I2S_Channel_Mono   I2S_Channel_Mono
+#define BEE_I2S_Channel_stereo I2S_Channel_stereo
+#define BEE_I2S_Mode           I2S_Mode
+#define BEE_PCM_Mode_A         PCM_Mode_A
+#define BEE_PCM_Mode_B         PCM_Mode_B
+#define BEE_Left_Justified_Mode Left_Justified_Mode
+#define BEE_I2S_DeviceMode_Master I2S_DeviceMode_Master
+#define BEE_I2S_DeviceMode_Slave  I2S_DeviceMode_Slave
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#define BEE_I2S_TX_CH_L_R    I2S_CH_SEQ_L_R
+#define BEE_I2S_TX_CH_R_L    I2S_CH_SEQ_R_L
+#define BEE_I2S_TX_CH_L_L    I2S_CH_SEQ_L_L
+#define BEE_I2S_TX_CH_R_R    I2S_CH_SEQ_R_R
+#define BEE_I2S_RX_CH_L_R    I2S_CH_SEQ_L_R
+#define BEE_I2S_RX_CH_R_L    I2S_CH_SEQ_R_L
+#define BEE_I2S_RX_CH_L_L    I2S_CH_SEQ_L_L
+#define BEE_I2S_RX_CH_R_R    I2S_CH_SEQ_R_R
+#define BEE_I2S_TX_MSB_First I2S_MSB_FIRST
+#define BEE_I2S_TX_LSB_First I2S_LSB_FIRST
+#define BEE_I2S_RX_MSB_First I2S_MSB_FIRST
+#define BEE_I2S_RX_LSB_First I2S_LSB_FIRST
+#define BEE_I2S_TX_FIFO_ADDR I2S_TX_FIFO_WR_ADDR
+#define BEE_I2S_RX_FIFO_ADDR I2S_RX_FIFO_RD_ADDR
+
+#define BEE_I2S_Width_8Bits    I2S_WIDTH_8BITS
+#define BEE_I2S_Width_16Bits   I2S_WIDTH_16BITS
+#define BEE_I2S_Width_24Bits   I2S_WIDTH_24BITS
+#define BEE_I2S_Channel_Mono   I2S_CHANNEL_MONO
+#define BEE_I2S_Channel_stereo I2S_CHANNEL_STEREO
+#define BEE_I2S_Mode           I2S_DATA_FORMAT_I2S
+#define BEE_PCM_Mode_A         I2S_DATA_FORMAT_PCM_A
+#define BEE_PCM_Mode_B         I2S_DATA_FORMAT_PCM_B
+#define BEE_Left_Justified_Mode I2S_DATA_FORMAT_LEFT_JUSTIFIED
+#define BEE_I2S_DeviceMode_Master I2S_DEVICE_MODE_MASTER
+#define BEE_I2S_DeviceMode_Slave  I2S_DEVICE_MODE_SLAVE
+
+#define BEE_I2S_WithExtCodecCmd(i2s, cmd) I2S_WithExtCodecCmd(i2s, cmd)
 #endif
-
-LOG_MODULE_REGISTER(i2s_bee, CONFIG_I2S_LOG_LEVEL);
-
-#define DT_DRV_COMPAT realtek_bee_i2s
 
 #define I2S_SRC_CLK 40000000
 
@@ -134,11 +181,13 @@ struct i2s_bee_data {
 	struct stream dma_tx;
 	void *tx_in_msgs[CONFIG_I2S_BEE_TX_BLOCK_COUNT];
 	void *tx_out_msgs[CONFIG_I2S_BEE_TX_BLOCK_COUNT];
+	uint8_t tx_ping_pong[2][CONFIG_I2S_BEE_TX_BLOCK_SIZE_MAX] __aligned(4);
 #endif
 #if defined(CONFIG_I2S_BEE_RX)
 	struct stream dma_rx;
 	void *rx_in_msgs[CONFIG_I2S_BEE_RX_BLOCK_COUNT];
 	void *rx_out_msgs[CONFIG_I2S_BEE_RX_BLOCK_COUNT];
+	uint8_t rx_ping_pong[2][CONFIG_I2S_BEE_RX_BLOCK_SIZE_MAX] __aligned(4);
 #endif
 };
 
@@ -290,22 +339,10 @@ static int i2s_tx_stream_start(const struct device *dev)
 	const struct device *dma_dev = strm->dma_dev;
 	struct dma_block_config *blk_cfg = strm->blk_cfg;
 
-	if (blk_cfg[0].block_size != strm->cfg.block_size) {
-		if (strm->ping_pong_buf[0] != NULL) {
-			k_free(strm->ping_pong_buf[0]);
-			k_free(strm->ping_pong_buf[1]);
-		}
-
-		strm->ping_pong_buf[0] = k_malloc(strm->cfg.block_size);
-		if (strm->ping_pong_buf[0] == NULL) {
-			return -EIO;
-		}
-
-		strm->ping_pong_buf[1] = k_malloc(strm->cfg.block_size);
-		if (strm->ping_pong_buf[1] == NULL) {
-			k_free(strm->ping_pong_buf[0]);
-			return -EIO;
-		}
+	if (strm->cfg.block_size > CONFIG_I2S_BEE_TX_BLOCK_SIZE_MAX) {
+		LOG_ERR("TX block size %u exceeds max %u", strm->cfg.block_size,
+			CONFIG_I2S_BEE_TX_BLOCK_SIZE_MAX);
+		return -EINVAL;
 	}
 
 	/* retrieve buffer from input queue */
@@ -404,22 +441,10 @@ static int i2s_rx_stream_start(const struct device *dev)
 	uint8_t num_of_bufs;
 	struct dma_block_config *blk_cfg = strm->blk_cfg;
 
-	if (blk_cfg[0].block_size != strm->cfg.block_size) {
-		if (strm->ping_pong_buf[0] != NULL) {
-			k_free(strm->ping_pong_buf[0]);
-			k_free(strm->ping_pong_buf[1]);
-		}
-		strm->ping_pong_buf[0] = k_malloc(strm->cfg.block_size);
-		if (strm->ping_pong_buf[0] == NULL) {
-			LOG_ERR("[%s] buf malloc fail! line%d\n", __func__, __LINE__);
-			return -EIO;
-		}
-		strm->ping_pong_buf[1] = k_malloc(strm->cfg.block_size);
-		if (strm->ping_pong_buf[1] == NULL) {
-			k_free(strm->ping_pong_buf[0]);
-			LOG_ERR("[%s] buf malloc fail! line%d\n", __func__, __LINE__);
-			return -EIO;
-		}
+	if (strm->cfg.block_size > CONFIG_I2S_BEE_RX_BLOCK_SIZE_MAX) {
+		LOG_ERR("RX block size %u exceeds max %u", strm->cfg.block_size,
+			CONFIG_I2S_BEE_RX_BLOCK_SIZE_MAX);
+		return -EINVAL;
 	}
 
 	num_of_bufs = k_mem_slab_num_free_get(strm->cfg.mem_slab);
@@ -576,9 +601,19 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 	uint32_t *channel_type;
 	uint32_t *data_format;
 	uint32_t *data_width;
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+	I2SChannelType_TypeDef *channel_type;
+	I2SDataFormat_TypeDef *data_format;
+	I2SWidth_TypeDef *data_width;
 #endif
 
 	I2S_InitTypeDef I2S_InitStruct;
+
+	/* I2S_DIR_BOTH is not supported; configure TX and RX separately */
+	if (dir == I2S_DIR_BOTH) {
+		LOG_ERR("I2S_DIR_BOTH not supported, configure TX and RX separately");
+		return -ENOSYS;
+	}
 
 	if (dir == I2S_DIR_TX) {
 #if defined(CONFIG_I2S_BEE_TX)
@@ -624,19 +659,35 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 	data_width = &I2S_InitStruct.I2S_DataWidth;
 	I2S_InitStruct.I2S_MCLKOutput = I2S_MCLK_128fs;
 	I2S_InitStruct.I2S_DMACmd = I2S_DMA_ENABLE;
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+	blck_mi = &I2S_InitStruct.I2S_BClockMi;
+	blck_ni = &I2S_InitStruct.I2S_BClockNi;
+	channel_type = &I2S_InitStruct.I2S_ChannelType;
+	data_format = &I2S_InitStruct.I2S_DataFormat;
+	data_width = &I2S_InitStruct.I2S_DataWidth;
+	I2S_InitStruct.I2S_MClockOutput = I2S_MCLK_128FS;
 #endif
 
-	if (i2s_cfg->frame_clk_freq == 8000) {
-		*blck_mi = 0x186A;
-		*blck_ni = 0x50;
-	} else if (i2s_cfg->frame_clk_freq == 16000) {
-		*blck_mi = 0x186A;
-		*blck_ni = 0xA0;
-	} else if (i2s_cfg->frame_clk_freq == 0) {
+	if (i2s_cfg->frame_clk_freq == 0) {
 		(void)clock_control_off(BEE_CLOCK_CONTROLLER,
 					(clock_control_subsys_t)&dev_cfg->clkid);
 
+		pinctrl_apply_state(dev_cfg->pinctrl, PINCTRL_STATE_SLEEP);
+
 		i2s_set_satus(dev_data, dir, I2S_STATE_NOT_READY);
+		return 0;
+	}
+
+	/*
+	 * BCLK = I2S_SRC_CLK * (Ni / Mi), with a 64 * fs frame (32-bit channel
+	 * width, stereo). Fixing Mi at 25000 gives Ni = fs / 25, which is exact
+	 * for every standard audio rate (8k - 192k) and fits the 15-bit Ni field
+	 * (max 192000 / 25 = 7680). This reproduces the legacy 8k/16k ratios.
+	 */
+	if ((i2s_cfg->frame_clk_freq % 25U) == 0U &&
+	    (i2s_cfg->frame_clk_freq / 25U) <= 0x7FFFU) {
+		*blck_mi = 25000U;
+		*blck_ni = i2s_cfg->frame_clk_freq / 25U;
 	} else {
 		LOG_ERR("invalid i2s sample rate: %d", i2s_cfg->frame_clk_freq);
 		i2s_set_satus(dev_data, dir, I2S_STATE_NOT_READY);
@@ -644,11 +695,11 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 	}
 
 	if (i2s_cfg->word_size == 8) {
-		*data_width = I2S_Width_8Bits;
+		*data_width = BEE_I2S_Width_8Bits;
 	} else if (i2s_cfg->word_size == 16) {
-		*data_width = I2S_Width_16Bits;
+		*data_width = BEE_I2S_Width_16Bits;
 	} else if (i2s_cfg->word_size == 24) {
-		*data_width = I2S_Width_24Bits;
+		*data_width = BEE_I2S_Width_24Bits;
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 	} else if (i2s_cfg->word_size == 20) {
 		*data_width = I2S_Width_20Bits;
@@ -663,9 +714,9 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 
 	/* channels == 0 for i2s codec tx pdm */
 	if (i2s_cfg->channels == 1 || i2s_cfg->channels == 0) {
-		*channel_type = I2S_Channel_Mono;
+		*channel_type = BEE_I2S_Channel_Mono;
 	} else if (i2s_cfg->channels == 2) {
-		*channel_type = I2S_Channel_stereo;
+		*channel_type = BEE_I2S_Channel_stereo;
 	} else {
 		LOG_ERR("invalid i2s channels: %d", i2s_cfg->channels);
 		i2s_set_satus(dev_data, dir, I2S_STATE_NOT_READY);
@@ -673,14 +724,14 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 	}
 
 	if ((i2s_cfg->format & I2S_FMT_DATA_FORMAT_MASK) == I2S_FMT_DATA_FORMAT_I2S) {
-		*data_format = I2S_Mode;
+		*data_format = BEE_I2S_Mode;
 	} else if ((i2s_cfg->format & I2S_FMT_DATA_FORMAT_MASK) == I2S_FMT_DATA_FORMAT_PCM_SHORT) {
-		*data_format = PCM_Mode_A;
+		*data_format = BEE_PCM_Mode_A;
 	} else if ((i2s_cfg->format & I2S_FMT_DATA_FORMAT_MASK) == I2S_FMT_DATA_FORMAT_PCM_LONG) {
-		*data_format = PCM_Mode_B;
+		*data_format = BEE_PCM_Mode_B;
 	} else if ((i2s_cfg->format & I2S_FMT_DATA_FORMAT_MASK) ==
 		   I2S_FMT_DATA_FORMAT_LEFT_JUSTIFIED) {
-		*data_format = Left_Justified_Mode;
+		*data_format = BEE_Left_Justified_Mode;
 	} else {
 		LOG_ERR("invalid i2s format: 0x%x", i2s_cfg->format);
 		i2s_set_satus(dev_data, dir, I2S_STATE_NOT_READY);
@@ -695,10 +746,10 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 		I2S_InitStruct.I2S_RxBitSequence = BEE_I2S_RX_MSB_First;
 	}
 
-	if ((i2s_cfg->options & I2S_OPT_BIT_CLK_SLAVE) == I2S_OPT_BIT_CLK_SLAVE) {
-		I2S_InitStruct.I2S_DeviceMode = I2S_DeviceMode_Slave;
+	if ((i2s_cfg->options & I2S_OPT_BIT_CLK_TARGET) == I2S_OPT_BIT_CLK_TARGET) {
+		I2S_InitStruct.I2S_DeviceMode = BEE_I2S_DeviceMode_Slave;
 	} else {
-		I2S_InitStruct.I2S_DeviceMode = I2S_DeviceMode_Master;
+		I2S_InitStruct.I2S_DeviceMode = BEE_I2S_DeviceMode_Master;
 	}
 
 	if ((i2s_cfg->options & I2S_OPT_BIT_CLK_GATED) == I2S_OPT_BIT_CLK_GATED) {
@@ -709,16 +760,26 @@ static int i2s_bee_configure(const struct device *dev, enum i2s_dir dir,
 		return -EINVAL;
 	}
 
+#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+	I2S_InitStruct.I2S_ClockSource = I2S_CLOCK_SRC_40M;
+	I2S_InitStruct.I2S_TxChannelSequence = BEE_I2S_TX_CH_L_R;
+	I2S_InitStruct.I2S_RxChannelSequence = BEE_I2S_RX_CH_L_R;
+#else
 	I2S_InitStruct.I2S_ClockSource = I2S_CLK_40M;
 	I2S_InitStruct.I2S_TxChSequence = BEE_I2S_TX_CH_L_R;
 	I2S_InitStruct.I2S_RxChSequence = BEE_I2S_RX_CH_L_R;
+#endif
+
 #if defined(CONFIG_I2S_BEE_TX)
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 	I2S_InitStruct.I2S_TxWaterlevel = 1;
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 	I2S_InitStruct.I2S_TxWaterlevel = 64 - dev_data->dma_tx.dma_cfg.dest_burst_length;
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+	I2S_InitStruct.I2S_TxWaterlevel = 16 - dev_data->dma_tx.dma_cfg.dest_burst_length;
 #endif
 #endif
+
 #if defined(CONFIG_I2S_BEE_RX)
 	I2S_InitStruct.I2S_RxWaterlevel = dev_data->dma_rx.dma_cfg.source_burst_length;
 #endif
@@ -902,11 +963,41 @@ static void i2s_bee_isr(const struct device *dev)
 	ARG_UNUSED(dev);
 }
 
+#if defined(CONFIG_I2S_BEE_TX) || defined(CONFIG_I2S_BEE_RX)
+/*
+ * Claim the devicetree-assigned channel through the DMA controller's allocation
+ * bitmap so a dma_request_channel(dev, NULL) caller on the same controller can
+ * never be handed it. A BIT(channel) filter forces exactly the DT channel and
+ * fails loudly if it is already in use.
+ */
+static int i2s_bee_claim_dma_channel(const struct device *dma_dev, uint32_t channel)
+{
+	uint32_t filter = BIT(channel);
+	int ret = dma_request_channel(dma_dev, &filter);
+
+	return ret < 0 ? ret : 0;
+}
+#endif
+
+#if defined(CONFIG_I2S_BEE_RX)
+static bool i2s_rx_shares_tx_channel(const struct i2s_bee_data *dev_data)
+{
+#if defined(CONFIG_I2S_BEE_TX)
+	return dev_data->dma_rx.dma_dev == dev_data->dma_tx.dma_dev &&
+	       dev_data->dma_rx.dma_channel == dev_data->dma_tx.dma_channel;
+#else
+	ARG_UNUSED(dev_data);
+	return false;
+#endif
+}
+#endif
+
 static int i2s_bee_init(const struct device *dev)
 {
 	const struct i2s_bee_config *dev_cfg = dev->config;
 	struct i2s_bee_data *dev_data = dev->data;
 	I2S_TypeDef *base = (I2S_TypeDef *)dev_cfg->base;
+	int ret = 0;
 
 #if defined(CONFIG_I2S_BEE_TX)
 	if (!dev_data->dma_tx.dma_dev) {
@@ -924,8 +1015,12 @@ static int i2s_bee_init(const struct device *dev)
 
 	/* Initialize the buffer queues */
 #if defined(CONFIG_I2S_BEE_TX)
-	atomic_set_bit(((struct dma_context *)dev_data->dma_tx.dma_dev->data)->atomic,
-		       dev_data->dma_tx.dma_channel);
+	ret = i2s_bee_claim_dma_channel(dev_data->dma_tx.dma_dev,
+					dev_data->dma_tx.dma_channel);
+	if (ret < 0) {
+		LOG_ERR("I2S TX DMA channel %u already in use", dev_data->dma_tx.dma_channel);
+		return ret;
+	}
 	k_msgq_init(&dev_data->dma_tx.in_queue, (char *)dev_data->tx_in_msgs, sizeof(void *),
 		    CONFIG_I2S_BEE_TX_BLOCK_COUNT);
 	k_msgq_init(&dev_data->dma_tx.out_queue, (char *)dev_data->tx_out_msgs, sizeof(void *),
@@ -945,12 +1040,27 @@ static int i2s_bee_init(const struct device *dev)
 	dev_data->dma_tx.blk_cfg[1].next_block = NULL;
 	dev_data->dma_tx.dma_cfg.head_block = &dev_data->dma_tx.blk_cfg[0];
 	dev_data->dma_tx.dma_cfg.user_data = (void *)dev;
+	dev_data->dma_tx.ping_pong_buf[0] = dev_data->tx_ping_pong[0];
+	dev_data->dma_tx.ping_pong_buf[1] = dev_data->tx_ping_pong[1];
 
 	dev_data->dma_tx.state = I2S_STATE_NOT_READY;
 #endif
 #if defined(CONFIG_I2S_BEE_RX)
-	atomic_set_bit(((struct dma_context *)dev_data->dma_rx.dma_dev->data)->atomic,
-		       dev_data->dma_rx.dma_channel);
+	/*
+	 * Claim the RX channel too. When a board places I2S TX and RX on one
+	 * shared DMA channel it is already reserved by the TX claim above, so only
+	 * request RX when it is a distinct channel to avoid a spurious -EINVAL
+	 * from the double claim.
+	 */
+	if (!i2s_rx_shares_tx_channel(dev_data)) {
+		ret = i2s_bee_claim_dma_channel(dev_data->dma_rx.dma_dev,
+						dev_data->dma_rx.dma_channel);
+		if (ret < 0) {
+			LOG_ERR("I2S RX DMA channel %u already in use",
+				dev_data->dma_rx.dma_channel);
+			return ret;
+		}
+	}
 	k_msgq_init(&dev_data->dma_rx.in_queue, (char *)dev_data->rx_in_msgs, sizeof(void *),
 		    CONFIG_I2S_BEE_RX_BLOCK_COUNT);
 	k_msgq_init(&dev_data->dma_rx.out_queue, (char *)dev_data->rx_out_msgs, sizeof(void *),
@@ -970,6 +1080,8 @@ static int i2s_bee_init(const struct device *dev)
 	dev_data->dma_rx.blk_cfg[1].next_block = NULL;
 	dev_data->dma_rx.dma_cfg.head_block = &dev_data->dma_rx.blk_cfg[0];
 	dev_data->dma_rx.dma_cfg.user_data = (void *)dev;
+	dev_data->dma_rx.ping_pong_buf[0] = dev_data->rx_ping_pong[0];
+	dev_data->dma_rx.ping_pong_buf[1] = dev_data->rx_ping_pong[1];
 
 	dev_data->dma_rx.state = I2S_STATE_NOT_READY;
 #endif
@@ -979,10 +1091,10 @@ static int i2s_bee_init(const struct device *dev)
 
 	LOG_INF("Device %s initialized", dev->name);
 
-	return 0;
+	return ret;
 }
 
-static const struct i2s_driver_api i2s_bee_driver_api = {
+static DEVICE_API(i2s, i2s_bee_driver_api) = {
 	.configure = i2s_bee_configure,
 #if defined(CONFIG_I2S_BEE_RX)
 	.read = i2s_bee_read,
@@ -1035,9 +1147,9 @@ static const struct i2s_driver_api i2s_bee_driver_api = {
 
 #define BEE_I2S_INIT(index)                                                                        \
 	static void i2s_bee_irq_config_func_##index(const struct device *dev);                     \
-                                                                                                   \
+	                                                                                           \
 	PINCTRL_DT_INST_DEFINE(index);                                                             \
-                                                                                                   \
+	                                                                                           \
 	static const struct i2s_bee_config i2s_bee_cfg_##index = {                                 \
 		.base = (I2S_TypeDef *)DT_INST_REG_ADDR(index),                                    \
 		.clkid = DT_INST_CLOCKS_CELL(index, id),                                           \
@@ -1046,13 +1158,13 @@ static const struct i2s_driver_api i2s_bee_driver_api = {
 		.internal_codec = DT_NODE_HAS_COMPAT_STATUS(DT_INST_CHILD(index, codec_0),         \
 							    realtek_bee_codec, okay),              \
 	};                                                                                         \
-                                                                                                   \
+	                                                                                           \
 	static struct i2s_bee_data i2s_bee_data_##index = {I2S_DMA_INIT(index)};                   \
-                                                                                                   \
+	                                                                                           \
 	DEVICE_DT_INST_DEFINE(index, &i2s_bee_init, NULL, &i2s_bee_data_##index,                   \
 			      &i2s_bee_cfg_##index, POST_KERNEL, CONFIG_I2S_INIT_PRIORITY,         \
 			      &i2s_bee_driver_api);                                                \
-                                                                                                   \
+	                                                                                           \
 	static void i2s_bee_irq_config_func_##index(const struct device *dev)                      \
 	{                                                                                          \
 		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(index, 0, irq),                                     \
