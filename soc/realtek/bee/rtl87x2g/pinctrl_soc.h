@@ -62,6 +62,23 @@ typedef pinctrl_soc_pin pinctrl_soc_pin_t;
 #define BEE_GET_PULL(pincfg) (((pincfg) >> BEE_PULL_POS) & BEE_PULL_MSK)
 #define BEE_GET_PIN(pincfg) (((pincfg) >> BEE_PIN_POS) & BEE_PIN_MSK)
 
+enum pinctrl_bee_wakeup_type {
+	PINCTRL_BEE_WAKEUP_SYS = 0, /**< System wakeup */
+#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+	PINCTRL_BEE_WAKEUP_PPU, /**< PPU wakeup */
+#endif
+};
+
+/**
+ * @brief Configure or disable wakeup on a pin.
+ *
+ * @param pin Pin number.
+ * @param polarity Wakeup polarity: 0 for low level, 1 for high level.
+ * @param type Wakeup type: PINCTRL_BEE_WAKEUP_SYS or PINCTRL_BEE_WAKEUP_PPU.
+ * @param enable True to enable wakeup, false to disable.
+ */
+void pinctrl_bee_wakeup_config(uint8_t pin, uint8_t polarity, uint8_t type, bool enable);
+
 #ifdef __cplusplus
 }
 #endif

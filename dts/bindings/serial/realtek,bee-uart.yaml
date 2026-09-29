@@ -1,4 +1,4 @@
-# Copyright(c) 2025, Realtek Semiconductor Corporation.
+# Copyright (c) 2026, Realtek Semiconductor Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 description: |
@@ -26,7 +26,12 @@ properties:
   pinctrl-names:
     required: true
 
+  rx-threshold:
+    type: int
+    description: |
+      The Rx threshold level to trigger rx interrupt, range from 1 to 29.
+
   flow-ctrl:
     type: boolean
     description: |
-      Enable cts and rts or not.
+      Enable CTS and RTS or not.

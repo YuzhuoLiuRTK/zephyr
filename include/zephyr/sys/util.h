@@ -407,6 +407,22 @@ extern "C" {
 #define CLAMP(val, low, high) (((val) <= (low)) ? (low) : MIN(val, high))
 #endif
 
+#ifndef __cplusplus
+/** @brief Return a value clamped to a given range.
+ *
+ * Backport of the Zephyr 4.x single evaluation clamp() macro.
+ */
+#define clamp(val, low, high) ({                                               \
+		/* random suffix to avoid naming conflict */                   \
+		__typeof__(val) _value_val_ = (val);                           \
+		__typeof__(low) _value_low_ = (low);                           \
+		__typeof__(high) _value_high_ = (high);                        \
+		(_value_val_ < _value_low_)  ? _value_low_ :                   \
+		(_value_val_ > _value_high_) ? _value_high_ :                  \
+					       _value_val_;                    \
+	})
+#endif
+
 /**
  * @brief Checks if a value is within range.
  *

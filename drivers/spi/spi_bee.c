@@ -1,13 +1,13 @@
 /*
- * Copyright(c) 2025, Realtek Semiconductor Corporation.
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
 #define DT_DRV_COMPAT realtek_bee_spi
 
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/pinctrl.h>
-#include <soc.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/bee_clock_control.h>
 #ifdef CONFIG_SPI_BEE_DMA
@@ -15,8 +15,12 @@
 #include <zephyr/drivers/dma/dma_bee.h>
 #endif
 #include <zephyr/irq.h>
-#include <zephyr/pm/device.h>
-#include <zephyr/pm/policy.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/kernel.h>
+
+LOG_MODULE_REGISTER(spi_bee, CONFIG_SPI_LOG_LEVEL);
+
+#include "spi_context.h"
 
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 #include <rtl_spi.h>
@@ -24,71 +28,102 @@
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 #include <rtl876x_spi.h>
 #include <rtl876x_rcc.h>
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#include <rtl_spi.h>
+#include <rtl_rcc.h>
+#else
+#error "Unsupported Realtek Bee SoC series"
 #endif
 
-#include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(spi_bee, CONFIG_SPI_LOG_LEVEL);
+#define SPI_DATASIZE_TO_BYTE(size) ((size) <= 16 ? ((((size) - 1) >> 3) + 1) : 4)
+#define SPI_SRC_CLOCK_HZ           40000000U
 
-#include "spi_context.h"
+#if defined(CONFIG_PM_DEVICE) && !defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+#define BEE_SPI_PM_RESTORE 1
+#endif
+
+#if defined(BEE_SPI_PM_RESTORE)
+#include <zephyr/pm/device.h>
+#endif
+
+#ifdef CONFIG_SPI_SLAVE
+#define SPI_SLAVE_ENABLED 1
+#else
+#define SPI_SLAVE_ENABLED 0
+#endif
+BUILD_ASSERT(!(DT_NODE_HAS_STATUS(DT_NODELABEL(spi0_slave), okay) && !SPI_SLAVE_ENABLED),
+	     "Error: CONFIG_SPI_SLAVE should be set 'y' if spi0_slave node is enabled");
+BUILD_ASSERT(
+	DT_NODE_HAS_STATUS(DT_NODELABEL(spi0), okay) +
+			DT_NODE_HAS_STATUS(DT_NODELABEL(spi0_slave), okay) <=
+		1,
+	"Error: Both 'spi0' and 'spi0_slave' nodes are enabled. Only one can be used at a time.");
+
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+#define BEE_SPI_RXDMAEN    SPI_RxDmaEn
+#define BEE_SPI_TXDMAEN    SPI_TxDmaEn
+#define BEE_SPI_CPOL_HIGH  SPI_CPOL_High
+#define BEE_SPI_CPOL_LOW   SPI_CPOL_Low
+#define BEE_SPI_CPHA_2EDGE SPI_CPHA_2Edge
+#define BEE_SPI_CPHA_1EDGE SPI_CPHA_1Edge
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+#define BEE_SPI_RXDMAEN    SPI_RxDmaEn
+#define BEE_SPI_TXDMAEN    SPI_TxDmaEn
+#define BEE_SPI_CPOL_HIGH  SPI_CPOL_High
+#define BEE_SPI_CPOL_LOW   SPI_CPOL_Low
+#define BEE_SPI_CPHA_2EDGE SPI_CPHA_2Edge
+#define BEE_SPI_CPHA_1EDGE SPI_CPHA_1Edge
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#define BEE_SPI_RXDMAEN    SPI_RxDMAEn
+#define BEE_SPI_TXDMAEN    SPI_TxDMAEn
+#define BEE_SPI_CPOL_HIGH  SPI_CPOL_HIGH
+#define BEE_SPI_CPOL_LOW   SPI_CPOL_LOW
+#define BEE_SPI_CPHA_2EDGE SPI_CPHA_2EDGE
+#define BEE_SPI_CPHA_1EDGE SPI_CPHA_1EDGE
+
+#define SPI_RX_FIFO_ADDR(spi) ((uint32_t)(&(spi->SPI_DR[0])))
+#define SPI_TX_FIFO_ADDR(spi) ((uint32_t)(&(spi->SPI_DR[0])))
+#endif
 
 #ifdef CONFIG_SPI_BEE_DMA
 
-struct spi_bee_dma_data {
-	struct dma_config config;
-	struct dma_block_config block;
-	uint32_t count;
-};
+K_MEM_SLAB_DEFINE(spi_dma_slab, CONFIG_SPI_BEE_DMA_BUF_SIZE, CONFIG_SPI_BEE_DMA_BUF_COUNT, 4);
 
 struct spi_dma_stream {
-	const struct device *dma_dev;
-	uint32_t dma_channel;
 	struct dma_config dma_cfg;
-	uint8_t priority;
+	struct dma_block_config blk_cfg;
+	const struct device *dma_dev;
+	void *dma_tmp_buf;
+	volatile size_t counter;
+	uint32_t dma_channel;
 	uint8_t src_addr_increment;
 	uint8_t dst_addr_increment;
-	int fifo_threshold;
-	struct dma_block_config blk_cfg;
-	uint8_t *buffer;
-	size_t buffer_length;
-	size_t offset;
-	volatile size_t counter;
-	int32_t timeout;
-	struct k_work_delayable timeout_work;
-	bool enabled;
-	uint8_t *dma_tmp_buf;
 };
-
 #endif
 
 struct spi_bee_data {
 	struct spi_context ctx;
-	const struct device *dev;
-	bool initialized;
 	uint32_t datasize;
+	bool initialized;
 #ifdef CONFIG_SPI_BEE_DMA
 	struct spi_dma_stream dma_rx;
 	struct spi_dma_stream dma_tx;
-	struct spi_bee_dma_data dma_rx_data;
-	struct spi_bee_dma_data dma_tx_data;
-#endif
-#ifdef CONFIG_PM_DEVICE
-	SPIStoreReg_Typedef store_buf;
 #endif
 };
 
 struct spi_bee_config {
+	const struct pinctrl_dev_config *pcfg;
 	uint32_t reg;
 	uint16_t clkid;
-	const struct pinctrl_dev_config *pcfg;
-	const bool is_slave;
+	bool is_slave;
 #ifdef CONFIG_SPI_BEE_INTERRUPT
-	void (*irq_configure)();
+	void (*irq_configure)(void);
 #endif
 };
 
 static bool spi_bee_tx_fifo_not_full(const struct spi_bee_config *cfg)
 {
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+#if defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL87X2J)
 	return SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
 	       (cfg->is_slave ? SPI0_SLAVE_TX_FIFO_SIZE : SPI_TX_FIFO_SIZE);
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
@@ -102,19 +137,19 @@ static bool spi_bee_tx_fifo_not_full(const struct spi_bee_config *cfg)
 
 static bool spi_bee_rx_fifo_not_full(const struct spi_bee_config *cfg)
 {
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
-	return SPI_GetRxFIFOLen((SPI_TypeDef *)cfg->reg) +
-		       SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
-	       (cfg->is_slave ? SPI0_SLAVE_RX_FIFO_SIZE : SPI_RX_FIFO_SIZE);
+#if defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL87X2J)
+	return (SPI_GetRxFIFOLen((SPI_TypeDef *)cfg->reg) +
+			SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
+		(cfg->is_slave ? SPI0_SLAVE_RX_FIFO_SIZE : SPI_RX_FIFO_SIZE));
 #elif defined(CONFIG_SOC_SERIES_RTL8752H)
 	if ((SPI_TypeDef *)cfg->reg == SPI1) {
-		return SPI_GetRxFIFOLen((SPI_TypeDef *)cfg->reg) +
-			       SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
-		       16;
+		return (SPI_GetRxFIFOLen((SPI_TypeDef *)cfg->reg) +
+				SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
+			16);
 	} else {
-		return SPI_GetRxFIFOLen((SPI_TypeDef *)cfg->reg) +
-			       SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
-		       64;
+		return (SPI_GetRxFIFOLen((SPI_TypeDef *)cfg->reg) +
+				SPI_GetTxFIFOLen((SPI_TypeDef *)cfg->reg) <
+			64);
 	}
 #endif
 }
@@ -157,29 +192,52 @@ static int spi_bee_get_err(const struct spi_bee_config *cfg)
 	return 0;
 }
 
+static inline void spi_bee_tx(struct spi_bee_data *data, SPI_TypeDef *spi, int dfs)
+{
+	uint32_t tx_frame = 0;
+	uint32_t datalen = data->datasize;
+
+	if (datalen <= 8) {
+		tx_frame = data->ctx.tx_buf ? UNALIGNED_GET((const uint8_t *)data->ctx.tx_buf) : 0;
+	} else if (datalen <= 16) {
+		tx_frame = data->ctx.tx_buf ? UNALIGNED_GET((const uint16_t *)data->ctx.tx_buf) : 0;
+	} else {
+		tx_frame = data->ctx.tx_buf ? UNALIGNED_GET((const uint32_t *)data->ctx.tx_buf) : 0;
+	}
+
+	SPI_SendData(spi, tx_frame);
+	spi_context_update_tx(&data->ctx, dfs, 1);
+}
+
+static inline void spi_bee_rx(struct spi_bee_data *data, SPI_TypeDef *spi, int dfs)
+{
+	uint32_t rx_frame = SPI_ReceiveData(spi);
+	uint32_t datalen = data->datasize;
+
+	if (spi_context_rx_buf_on(&data->ctx)) {
+		if (datalen <= 8) {
+			UNALIGNED_PUT((uint8_t)rx_frame, (uint8_t *)data->ctx.rx_buf);
+		} else if (datalen <= 16) {
+			UNALIGNED_PUT((uint16_t)rx_frame, (uint16_t *)data->ctx.rx_buf);
+		} else {
+			UNALIGNED_PUT((uint32_t)rx_frame, (uint32_t *)data->ctx.rx_buf);
+		}
+	}
+
+	spi_context_update_rx(&data->ctx, dfs, MIN(data->ctx.rx_len, 1));
+}
+
 static int spi_bee_frame_exchange(const struct device *dev)
 {
 	struct spi_bee_data *data = dev->data;
 	const struct spi_bee_config *dev_config = dev->config;
 	SPI_TypeDef *spi = (SPI_TypeDef *)dev_config->reg;
 	struct spi_context *ctx = &data->ctx;
-	uint32_t datalen = data->datasize;
-	int dfs = ((datalen - 1) >> 3) + 1;
-	uint16_t tx_frame = 0U, rx_frame = 0U;
+	int dfs = SPI_DATASIZE_TO_BYTE(data->datasize);
 
 	while (spi_bee_tx_fifo_not_full(dev_config) && spi_bee_rx_fifo_not_full(dev_config)) {
 		if (ctx->tx_len) {
-			if (datalen <= 8) {
-				tx_frame = ctx->tx_buf ? *(uint8_t *)(data->ctx.tx_buf) : 0;
-			} else if (datalen <= 16) {
-				tx_frame = ctx->tx_buf ? *(uint16_t *)(data->ctx.tx_buf) : 0;
-			} else if (datalen <= 32) {
-				tx_frame = ctx->tx_buf ? *(uint32_t *)(data->ctx.tx_buf) : 0;
-			}
-
-			SPI_SendData(spi, tx_frame);
-
-			spi_context_update_tx(ctx, dfs, 1);
+			spi_bee_tx(data, spi, dfs);
 		} else if (SPI_GetTxFIFOLen(spi) + SPI_GetRxFIFOLen(spi) < ctx->rx_len) {
 			SPI_SendData(spi, 0);
 		} else {
@@ -188,17 +246,7 @@ static int spi_bee_frame_exchange(const struct device *dev)
 	}
 
 	while (!spi_bee_rx_fifo_empty(dev_config)) {
-		rx_frame = SPI_ReceiveData(spi);
-		if (spi_context_rx_buf_on(ctx)) {
-			if (datalen <= 8) {
-				*(uint8_t *)data->ctx.rx_buf = rx_frame;
-			} else if (datalen <= 16) {
-				*(uint16_t *)data->ctx.rx_buf = rx_frame;
-			} else if (datalen <= 32) {
-				*(uint32_t *)data->ctx.rx_buf = rx_frame;
-			}
-		}
-		spi_context_update_rx(ctx, dfs, MIN(ctx->rx_len, 1));
+		spi_bee_rx(data, spi, dfs);
 	}
 
 	return spi_bee_get_err(dev_config);
@@ -219,12 +267,12 @@ static void spi_bee_complete(const struct device *dev, int status)
 		dma_stop(dev_data->dma_rx.dma_dev, dev_data->dma_rx.dma_channel);
 
 		if (dev_data->dma_tx.dma_tmp_buf) {
-			k_free(dev_data->dma_tx.dma_tmp_buf);
+			k_mem_slab_free(&spi_dma_slab, dev_data->dma_tx.dma_tmp_buf);
 			dev_data->dma_tx.dma_tmp_buf = NULL;
 		}
 
 		if (dev_data->dma_rx.dma_tmp_buf) {
-			k_free(dev_data->dma_rx.dma_tmp_buf);
+			k_mem_slab_free(&spi_dma_slab, dev_data->dma_rx.dma_tmp_buf);
 			dev_data->dma_rx.dma_tmp_buf = NULL;
 		}
 	}
@@ -240,7 +288,7 @@ static void spi_bee_complete(const struct device *dev, int status)
 	spi_context_release(&dev_data->ctx, status);
 }
 
-static void spi_bee_isr(struct device *dev)
+static void spi_bee_isr(const struct device *dev)
 {
 	const struct spi_bee_config *cfg = dev->config;
 	int err = 0;
@@ -263,92 +311,121 @@ static void spi_bee_isr(struct device *dev)
 #endif /* CONFIG_SPI_BEE_INTERRUPT */
 
 #ifdef CONFIG_SPI_BEE_DMA
+static int spi_bee_dma_buf_alloc(struct spi_bee_data *data, size_t chunk_len)
+{
+	int ret;
+
+	if (data->dma_tx.dma_tmp_buf) {
+		k_mem_slab_free(&spi_dma_slab, data->dma_tx.dma_tmp_buf);
+		data->dma_tx.dma_tmp_buf = NULL;
+	}
+	if (data->dma_rx.dma_tmp_buf) {
+		k_mem_slab_free(&spi_dma_slab, data->dma_rx.dma_tmp_buf);
+		data->dma_rx.dma_tmp_buf = NULL;
+	}
+
+	if (!(uintptr_t)data->ctx.rx_buf) {
+		ret = k_mem_slab_alloc(&spi_dma_slab, &data->dma_rx.dma_tmp_buf, K_NO_WAIT);
+		if (ret < 0) {
+			LOG_ERR("spi rx dma slab alloc fail");
+			return -ENOMEM;
+		}
+		memset(data->dma_rx.dma_tmp_buf, 0, chunk_len);
+	}
+
+	if (!(uintptr_t)data->ctx.tx_buf) {
+		ret = k_mem_slab_alloc(&spi_dma_slab, &data->dma_tx.dma_tmp_buf, K_NO_WAIT);
+		if (ret < 0) {
+			LOG_ERR("spi tx dma slab alloc fail");
+			if (data->dma_rx.dma_tmp_buf) {
+				k_mem_slab_free(&spi_dma_slab, data->dma_rx.dma_tmp_buf);
+				data->dma_rx.dma_tmp_buf = NULL;
+			}
+			return -ENOMEM;
+		}
+		memset(data->dma_tx.dma_tmp_buf, 0, chunk_len);
+	}
+	return 0;
+}
+
 static int spi_bee_start_dma_transceive(const struct device *dev)
 {
 	const struct spi_bee_config *cfg = dev->config;
 	struct spi_bee_data *data = dev->data;
-	const size_t chunk_len = spi_context_max_continuous_chunk(&data->ctx);
 	SPI_TypeDef *spi = (SPI_TypeDef *)cfg->reg;
 	struct dma_status status;
 	int ret = 0;
+	uint8_t dma_datasize = SPI_DATASIZE_TO_BYTE(data->datasize);
+	const size_t chunk_len = spi_context_max_continuous_chunk(&data->ctx) * dma_datasize;
 
-	if (data->dma_tx.dma_tmp_buf) {
-		k_free(data->dma_tx.dma_tmp_buf);
-		data->dma_tx.dma_tmp_buf = NULL;
+	if (chunk_len == 0) {
+		spi_bee_complete(dev, 0);
+		return 0;
 	}
 
-	if (data->dma_rx.dma_tmp_buf) {
-		k_free(data->dma_rx.dma_tmp_buf);
-		data->dma_rx.dma_tmp_buf = NULL;
+	if (chunk_len > CONFIG_SPI_BEE_DMA_BUF_SIZE) {
+		LOG_ERR("DMA chunk length %d exceeds slab size %d", chunk_len,
+			CONFIG_SPI_BEE_DMA_BUF_SIZE);
+		return -EINVAL;
 	}
 
-	if (!(uint32_t)data->ctx.rx_buf) {
-		data->dma_rx.dma_tmp_buf = k_malloc(chunk_len);
-
-		if (!data->dma_rx.dma_tmp_buf) {
-			LOG_ERR("spi rx dma malloc fail");
-			return -ENOMEM;
-		}
-
-		memset(data->dma_rx.dma_tmp_buf, 0, chunk_len);
+	ret = spi_bee_dma_buf_alloc(data, chunk_len);
+	if (ret < 0) {
+		return ret;
 	}
 
-	if (!(uint32_t)data->ctx.tx_buf) {
-		data->dma_tx.dma_tmp_buf = k_malloc(chunk_len);
-
-		if (!data->dma_tx.dma_tmp_buf) {
-			LOG_ERR("spi tx dma malloc fail");
-			return -ENOMEM;
-		}
-
-		memset(data->dma_tx.dma_tmp_buf, 0, chunk_len);
-	}
+	SPI_Cmd(spi, DISABLE);
+	SPI_Cmd(spi, ENABLE);
 
 	dma_get_status(data->dma_rx.dma_dev, data->dma_rx.dma_channel, &status);
 	if (chunk_len != data->dma_rx.counter && !status.busy) {
-		data->dma_rx.blk_cfg.dest_address = data->ctx.rx_buf
-							    ? (uint32_t)data->ctx.rx_buf
-							    : (uint32_t)data->dma_rx.dma_tmp_buf;
+		data->dma_rx.blk_cfg.dest_address =
+			data->ctx.rx_buf ? (uint32_t)(uintptr_t)data->ctx.rx_buf
+					 : (uint32_t)(uintptr_t)data->dma_rx.dma_tmp_buf;
 		data->dma_rx.blk_cfg.block_size = chunk_len;
 		ret = dma_config(data->dma_rx.dma_dev, data->dma_rx.dma_channel,
 				 &data->dma_rx.dma_cfg);
 		if (ret < 0) {
-			LOG_ERR("dma_config %p failed %d\n", data->dma_rx.dma_dev, ret);
-			goto on_error;
+			goto error;
 		}
 		ret = dma_start(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
 		if (ret < 0) {
-			LOG_ERR("dma_start %p failed %d\n", data->dma_rx.dma_dev, ret);
-			goto on_error;
+			goto error;
 		}
 	}
 
-	dma_get_status(data->dma_tx.dma_dev, data->dma_tx.dma_channel, &status);
-	if (chunk_len != data->dma_tx.counter && !status.busy) {
-		data->dma_tx.blk_cfg.source_address = data->ctx.tx_buf
-							      ? (uint32_t)data->ctx.tx_buf
-							      : (uint32_t)data->dma_tx.dma_tmp_buf;
+	if (chunk_len != data->dma_tx.counter) {
+		data->dma_tx.blk_cfg.source_address =
+			data->ctx.tx_buf ? (uint32_t)(uintptr_t)data->ctx.tx_buf
+					 : (uint32_t)(uintptr_t)data->dma_tx.dma_tmp_buf;
 		data->dma_tx.blk_cfg.block_size = chunk_len;
 
+		dma_stop(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
 		ret = dma_config(data->dma_tx.dma_dev, data->dma_tx.dma_channel,
 				 &data->dma_tx.dma_cfg);
 		if (ret < 0) {
-			LOG_ERR("dma_config %p failed %d\n", data->dma_tx.dma_dev, ret);
-			goto on_error;
+			goto error;
 		}
 		ret = dma_start(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
 		if (ret < 0) {
-			LOG_ERR("dma_start %p failed %d\n", data->dma_tx.dma_dev, ret);
-			goto on_error;
+			goto error;
 		}
 	}
 
-	SPI_Cmd(spi, ENABLE);
-
-on_error:
+error:
 	if (ret < 0) {
 		dma_stop(data->dma_rx.dma_dev, data->dma_rx.dma_channel);
 		dma_stop(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
+
+		if (data->dma_rx.dma_tmp_buf) {
+			k_mem_slab_free(&spi_dma_slab, data->dma_rx.dma_tmp_buf);
+			data->dma_rx.dma_tmp_buf = NULL;
+		}
+
+		if (data->dma_tx.dma_tmp_buf) {
+			k_mem_slab_free(&spi_dma_slab, data->dma_tx.dma_tmp_buf);
+			data->dma_tx.dma_tmp_buf = NULL;
+		}
 	}
 	return ret;
 }
@@ -368,7 +445,7 @@ void spi_bee_dma_rx_cb(const struct device *dev, void *user_data, uint32_t chann
 	struct spi_bee_data *data = spi_dev->data;
 	const size_t chunk_len = spi_context_max_continuous_chunk(&data->ctx);
 	uint32_t datalen = data->datasize;
-	int dfs = ((datalen - 1) >> 3) + 1;
+	int dfs = SPI_DATASIZE_TO_BYTE(datalen);
 	int err = 0;
 
 	if (status < 0) {
@@ -404,6 +481,12 @@ void spi_bee_dma_rx_cb(const struct device *dev, void *user_data, uint32_t chann
 
 void spi_bee_dma_tx_cb(const struct device *dev, void *user_data, uint32_t channel, int status)
 {
+	/* TX callback is intentionally left empty. Handled in RX callback. */
+
+	ARG_UNUSED(dev);
+	ARG_UNUSED(user_data);
+	ARG_UNUSED(channel);
+	ARG_UNUSED(status);
 }
 
 #endif /* CONFIG_SPI_BEE_DMA */
@@ -415,7 +498,6 @@ static int spi_bee_configure(const struct device *dev, const struct spi_config *
 	SPI_TypeDef *spi = (SPI_TypeDef *)config->reg;
 	struct spi_context *ctx = &data->ctx;
 	SPI_InitTypeDef spi_init_struct;
-	uint32_t bus_freq;
 #ifdef CONFIG_SPI_BEE_DMA
 	int dma_datasize;
 #endif
@@ -423,6 +505,14 @@ static int spi_bee_configure(const struct device *dev, const struct spi_config *
 		/* Already configured. No need to do it again. */
 		return 0;
 	}
+
+#if defined(CONFIG_SOC_SERIES_RTL87X2J)
+	if (SPI_WORD_SIZE_GET(spi_cfg->operation) > 16) {
+		LOG_ERR("Data size: %d is not supported on %s",
+			SPI_WORD_SIZE_GET(spi_cfg->operation), dev->name);
+		return -ENOTSUP;
+	}
+#endif
 
 	if (SPI_OP_MODE_GET(spi_cfg->operation) == SPI_OP_MODE_MASTER && config->is_slave) {
 		LOG_ERR("Master mode is not supported on %s", dev->name);
@@ -456,37 +546,38 @@ static int spi_bee_configure(const struct device *dev, const struct spi_config *
 	}
 
 	SPI_StructInit(&spi_init_struct);
-	bus_freq = 40000000;
 	if (!config->is_slave) {
-		spi_init_struct.SPI_BaudRatePrescaler = bus_freq / spi_cfg->frequency;
+		spi_init_struct.SPI_BaudRatePrescaler = SPI_SRC_CLOCK_HZ / spi_cfg->frequency;
 	}
 #if defined(CONFIG_SOC_SERIES_RTL8752H)
 	else {
 		spi_init_struct.SPI_Mode = SPI_Mode_Slave;
 	}
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+	else {
+		spi_init_struct.SPI_Mode = SPI_MODE_SLAVE;
+	}
 #endif
 
 	spi_init_struct.SPI_DataSize = SPI_WORD_SIZE_GET(spi_cfg->operation) - 1;
 	spi_init_struct.SPI_CPOL =
-		spi_cfg->operation & SPI_MODE_CPOL ? SPI_CPOL_High : SPI_CPOL_Low;
+		spi_cfg->operation & SPI_MODE_CPOL ? BEE_SPI_CPOL_HIGH : BEE_SPI_CPOL_LOW;
 	spi_init_struct.SPI_CPHA =
-		spi_cfg->operation & SPI_MODE_CPHA ? SPI_CPHA_2Edge : SPI_CPHA_1Edge;
+		spi_cfg->operation & SPI_MODE_CPHA ? BEE_SPI_CPHA_2EDGE : BEE_SPI_CPHA_1EDGE;
 	spi_init_struct.SPI_TxThresholdLevel = 0;
 	spi_init_struct.SPI_RxThresholdLevel = 0;
 #ifdef CONFIG_SPI_BEE_DMA
-	dma_datasize = SPI_WORD_SIZE_GET(spi_cfg->operation) > 16
-			       ? 4
-			       : (SPI_WORD_SIZE_GET(spi_cfg->operation) > 8 ? 2 : 1);
+	dma_datasize = SPI_DATASIZE_TO_BYTE(SPI_WORD_SIZE_GET(spi_cfg->operation));
 	if (data->dma_rx.dma_dev != NULL) {
-		spi_init_struct.SPI_RxDmaEn = ENABLE;
+		spi_init_struct.BEE_SPI_RXDMAEN = ENABLE;
 		spi_init_struct.SPI_RxWaterlevel = data->dma_rx.dma_cfg.source_burst_length;
 		data->dma_rx.dma_cfg.source_data_size = dma_datasize;
 		data->dma_rx.dma_cfg.dest_data_size = dma_datasize;
 	}
 
 	if (data->dma_tx.dma_dev != NULL) {
-		spi_init_struct.SPI_TxDmaEn = ENABLE;
-#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+		spi_init_struct.BEE_SPI_TXDMAEN = ENABLE;
+#if defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL87X2J)
 		spi_init_struct.SPI_TxWaterlevel =
 			(config->is_slave ? SPI0_SLAVE_TX_FIFO_SIZE : SPI_TX_FIFO_SIZE) -
 			data->dma_tx.dma_cfg.dest_burst_length;
@@ -526,12 +617,14 @@ static int spi_bee_transceive_impl(const struct device *dev, const struct spi_co
 	spi_context_lock(&data->ctx, asynchronous, cb, userdata, spi_cfg);
 	ret = spi_bee_configure(dev, spi_cfg);
 	if (ret < 0) {
-		goto error;
+		spi_context_release(&data->ctx, ret);
+		return ret;
 	}
 
 	SPI_Cmd(spi, ENABLE);
 
-	spi_context_buffers_setup(&data->ctx, tx_bufs, rx_bufs, ((data->datasize - 1) >> 3) + 1);
+	spi_context_buffers_setup(&data->ctx, tx_bufs, rx_bufs,
+				  SPI_DATASIZE_TO_BYTE(data->datasize));
 
 	if (!config->is_slave) {
 		spi_context_cs_control(&data->ctx, true);
@@ -546,7 +639,16 @@ static int spi_bee_transceive_impl(const struct device *dev, const struct spi_co
 			}
 		} while (spi_bee_transfer_ongoing(dev));
 
-#else /* defined(CONFIG_SPI_ASYNC) && defined(CONFIG_SPI_BEE_INTERRUPT) */
+		if (!config->is_slave) {
+			spi_context_cs_control(&data->ctx, false);
+		}
+
+		SPI_Cmd(spi, DISABLE);
+
+		spi_context_release(&data->ctx, ret);
+		return ret;
+
+#else
 #if defined(CONFIG_SPI_BEE_DMA)
 		if (data->dma_rx.dma_dev && data->dma_tx.dma_dev) {
 			data->dma_rx.counter = 0;
@@ -554,34 +656,25 @@ static int spi_bee_transceive_impl(const struct device *dev, const struct spi_co
 
 			ret = spi_bee_start_dma_transceive(dev);
 			if (ret < 0) {
-				goto dma_error;
+				if (!config->is_slave) {
+					spi_context_cs_control(&data->ctx, false);
+				}
+				SPI_Cmd(spi, DISABLE);
+				spi_context_release(&data->ctx, ret);
+				return ret;
 			}
-
-		} else
-#endif
+		} else {
+			SPI_INTConfig(spi, SPI_INT_TXE | SPI_INT_RXF, ENABLE);
+		}
+#else
 		{
 			SPI_INTConfig(spi, SPI_INT_TXE | SPI_INT_RXF, ENABLE);
 		}
+#endif /* CONFIG_SPI_BEE_DMA */
 
 		ret = spi_context_wait_for_completion(&data->ctx);
-
 		return ret;
-#endif
-
-#if defined(CONFIG_SPI_BEE_DMA)
-dma_error:
-#endif
-
-		if (!config->is_slave) {
-			spi_context_cs_control(&data->ctx, false);
-		}
-
-		SPI_Cmd(spi, DISABLE);
-
-error:
-		spi_context_release(&data->ctx, ret);
-
-		return ret;
+#endif /* CONFIG_SPI_ASYNC */
 	}
 
 #if defined(CONFIG_SPI_BEE_DMA)
@@ -591,14 +684,22 @@ error:
 
 		ret = spi_bee_start_dma_transceive(dev);
 		if (ret < 0) {
-			goto dma_error;
+			if (!config->is_slave) {
+				spi_context_cs_control(&data->ctx, false);
+			}
+			SPI_Cmd(spi, DISABLE);
+			spi_context_release(&data->ctx, ret);
+			return ret;
 		}
 
-	} else
-#endif
+	} else {
+		SPI_INTConfig(spi, SPI_INT_TXE | SPI_INT_RXF, ENABLE);
+	}
+#else
 	{
 		SPI_INTConfig(spi, SPI_INT_TXE | SPI_INT_RXF, ENABLE);
 	}
+#endif /* CONFIG_SPI_BEE_DMA */
 
 	return 0;
 }
@@ -622,57 +723,13 @@ static int spi_bee_transceive_async(const struct device *dev, const struct spi_c
 static int spi_bee_release(const struct device *dev, const struct spi_config *config)
 {
 	struct spi_bee_data *data = dev->data;
+
+	ARG_UNUSED(config);
+
 	spi_context_unlock_unconditionally(&data->ctx);
 
 	return 0;
 }
-
-#ifdef CONFIG_PM_DEVICE
-static int spi_bee_pm_action(const struct device *dev, enum pm_device_action action)
-{
-	struct spi_bee_data *data = dev->data;
-	const struct spi_bee_config *config = dev->config;
-	int err;
-
-	switch (action) {
-	case PM_DEVICE_ACTION_SUSPEND:
-		/* Move pins to sleep state */
-		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
-		if ((err < 0) && (err != -ENOENT)) {
-			return err;
-		}
-		break;
-	case PM_DEVICE_ACTION_RESUME:
-		/* Set pins to active state */
-		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
-		if (err < 0) {
-			return err;
-		}
-
-		(void)clock_control_on(BEE_CLOCK_CONTROLLER,
-				       (clock_control_subsys_t)&config->clkid);
-
-		if (data->initialized) {
-			data->initialized = false;
-			spi_bee_configure(dev, data->ctx.config);
-		}
-
-		break;
-	default:
-		return -ENOTSUP;
-	}
-
-	return 0;
-}
-#endif /* CONFIG_PM_DEVICE */
-
-static const struct spi_driver_api spi_bee_driver_api = {
-	.transceive = spi_bee_transceive,
-#ifdef CONFIG_SPI_ASYNC
-	.transceive_async = spi_bee_transceive_async,
-#endif
-	.release = spi_bee_release,
-};
 
 #ifdef CONFIG_SPI_BEE_DMA
 static int spi_bee_dma_init(const struct device *dev)
@@ -682,15 +739,40 @@ static int spi_bee_dma_init(const struct device *dev)
 	SPI_TypeDef *spi = (SPI_TypeDef *)config->reg;
 	int ret = 0;
 
+	if (data->dma_rx.dma_dev != NULL && !device_is_ready(data->dma_rx.dma_dev)) {
+		return -ENODEV;
+	}
+
+	if (data->dma_tx.dma_dev != NULL && !device_is_ready(data->dma_tx.dma_dev)) {
+		return -ENODEV;
+	}
+
+	/*
+	 * Claim the devicetree-assigned channels through the DMA controller's
+	 * allocation bitmap so that dma_request_channel() (e.g. a memory-to-memory
+	 * user on the same controller) can never hand them out again. Using a
+	 * BIT(channel) filter forces exactly the DT channel and fails loudly if it
+	 * is already taken.
+	 */
 	if (data->dma_rx.dma_dev != NULL) {
-		if (!device_is_ready(data->dma_rx.dma_dev)) {
-			return -ENODEV;
+		uint32_t ch_filter = BIT(data->dma_rx.dma_channel);
+
+		ret = dma_request_channel(data->dma_rx.dma_dev, &ch_filter);
+		if (ret < 0) {
+			LOG_ERR("SPI RX DMA channel %u already in use",
+				data->dma_rx.dma_channel);
+			return ret;
 		}
 	}
 
 	if (data->dma_tx.dma_dev != NULL) {
-		if (!device_is_ready(data->dma_tx.dma_dev)) {
-			return -ENODEV;
+		uint32_t ch_filter = BIT(data->dma_tx.dma_channel);
+
+		ret = dma_request_channel(data->dma_tx.dma_dev, &ch_filter);
+		if (ret < 0) {
+			LOG_ERR("SPI TX DMA channel %u already in use",
+				data->dma_tx.dma_channel);
+			return ret;
 		}
 	}
 
@@ -708,7 +790,7 @@ static int spi_bee_dma_init(const struct device *dev)
 	data->dma_rx.blk_cfg.dest_reload_en = 0;
 
 	data->dma_rx.dma_cfg.head_block = &data->dma_rx.blk_cfg;
-	data->dma_rx.dma_cfg.user_data = (void *)dev;
+	data->dma_rx.dma_cfg.user_data = (void *)(uintptr_t)dev;
 
 	/* Configure dma tx config */
 	memset(&data->dma_tx.blk_cfg, 0, sizeof(data->dma_tx.blk_cfg));
@@ -722,7 +804,7 @@ static int spi_bee_dma_init(const struct device *dev)
 	data->dma_tx.blk_cfg.dest_addr_adj = data->dma_tx.dst_addr_increment;
 
 	data->dma_tx.dma_cfg.head_block = &data->dma_tx.blk_cfg;
-	data->dma_tx.dma_cfg.user_data = (void *)dev;
+	data->dma_tx.dma_cfg.user_data = (void *)(uintptr_t)dev;
 
 	ret = dma_config(data->dma_rx.dma_dev, data->dma_rx.dma_channel, &data->dma_rx.dma_cfg);
 	if (ret < 0) {
@@ -730,9 +812,6 @@ static int spi_bee_dma_init(const struct device *dev)
 	}
 
 	ret = dma_config(data->dma_tx.dma_dev, data->dma_tx.dma_channel, &data->dma_tx.dma_cfg);
-	if (ret < 0) {
-		return ret;
-	}
 
 	return ret;
 }
@@ -750,7 +829,24 @@ static int spi_bee_init(const struct device *dev)
 		return ret;
 	}
 
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+	ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_SLEEP);
+	if ((ret < 0) && (ret != -ENOENT)) {
+		LOG_ERR("Failed to apply pinctrl state");
+		return ret;
+	}
+#endif
+
 	(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&cfg->clkid);
+
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+	/* Configure as default mode, or SPI slave will keep the SPI qactive on. */
+	SPI_InitTypeDef spi_init_struct;
+	SPI_TypeDef *spi = (SPI_TypeDef *)cfg->reg;
+
+	SPI_StructInit(&spi_init_struct);
+	SPI_Init(spi, &spi_init_struct);
+#endif
 
 #ifdef CONFIG_SPI_BEE_DMA
 	if ((data->dma_rx.dma_dev && !data->dma_tx.dma_dev) ||
@@ -774,13 +870,61 @@ static int spi_bee_init(const struct device *dev)
 	}
 
 #ifdef CONFIG_SPI_BEE_INTERRUPT
-	cfg->irq_configure(dev);
+	cfg->irq_configure();
 #endif
 
 	spi_context_unlock_unconditionally(&data->ctx);
 
 	return 0;
 }
+
+#if defined(BEE_SPI_PM_RESTORE)
+static int spi_bee_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	struct spi_bee_data *data = dev->data;
+	const struct spi_bee_config *cfg = dev->config;
+	int ret;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_SUSPEND:
+		(void)clock_control_off(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&cfg->clkid);
+
+		ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_SLEEP);
+		if ((ret < 0) && (ret != -ENOENT)) {
+			return ret;
+		}
+		break;
+	case PM_DEVICE_ACTION_RESUME:
+		ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);
+		if (ret < 0) {
+			return ret;
+		}
+
+		(void)clock_control_on(BEE_CLOCK_CONTROLLER, (clock_control_subsys_t)&cfg->clkid);
+
+		if (data->initialized) {
+			data->initialized = false;
+			ret = spi_bee_configure(dev, data->ctx.config);
+			if (ret < 0) {
+				return ret;
+			}
+		}
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+#endif /* BEE_SPI_PM_RESTORE */
+
+static DEVICE_API(spi, spi_bee_driver_api) = {
+	.transceive = spi_bee_transceive,
+#ifdef CONFIG_SPI_ASYNC
+	.transceive_async = spi_bee_transceive_async,
+#endif
+	.release = spi_bee_release,
+};
 
 #define SPI_DMA_CHANNEL_INIT(index, dir)                                                           \
 	.dma_dev = DEVICE_DT_GET(BEE_DMA_CTLR(index, dir)),                                        \
@@ -810,51 +954,46 @@ static int spi_bee_init(const struct device *dev)
 #if defined(CONFIG_SPI_BEE_DMA)
 #define SPI_DMA_CHANNEL(index, dir)                                                                \
 	.dma_##dir = {COND_CODE_1(DT_INST_DMAS_HAS_NAME(index, dir),                               \
-				  (SPI_DMA_CHANNEL_INIT(index, dir)), (NULL))},
+				  (SPI_DMA_CHANNEL_INIT(index, dir)), (0))},
 #else
 #define SPI_DMA_CHANNEL(index, dir)
 #endif
 
 #define SPI_BEE_IRQ_CONFIGURE(index)                                                               \
-	static void spi_bee_irq_configure_##index(void)                                            \
+	static void spi_bee_irq_config_##index(void)                                               \
 	{                                                                                          \
 		IRQ_CONNECT(DT_INST_IRQN(index), DT_INST_IRQ(index, priority), spi_bee_isr,        \
 			    DEVICE_DT_INST_GET(index), 0);                                         \
 		irq_enable(DT_INST_IRQN(index));                                                   \
 	}
 
+#if defined(BEE_SPI_PM_RESTORE)
+#define BEE_SPI_PM_DEFINE(index) PM_DEVICE_DT_INST_DEFINE(index, spi_bee_pm_action);
+#define BEE_SPI_PM_GET(index)    PM_DEVICE_DT_INST_GET(index)
+#else
+#define BEE_SPI_PM_DEFINE(index)
+#define BEE_SPI_PM_GET(index) NULL
+#endif
+
 #define BEE_SPI_INIT(index)                                                                        \
 	PINCTRL_DT_INST_DEFINE(index);                                                             \
-	IF_ENABLED(CONFIG_SPI_BEE_INTERRUPT, (SPI_BEE_IRQ_CONFIGURE(index)));                      \
+	IF_ENABLED(CONFIG_SPI_BEE_INTERRUPT,                                                       \
+		   (SPI_BEE_IRQ_CONFIGURE(index)));                       \
 	static struct spi_bee_data spi_bee_data_##index = {                                        \
 		SPI_CONTEXT_INIT_LOCK(spi_bee_data_##index, ctx),                                  \
 		SPI_CONTEXT_INIT_SYNC(spi_bee_data_##index, ctx),                                  \
-		SPI_CONTEXT_CS_GPIOS_INITIALIZE(DT_DRV_INST(index), ctx).dev =                     \
-			DEVICE_DT_INST_GET(index),                                                 \
-		.initialized = false, SPI_DMA_CHANNEL(index, rx) SPI_DMA_CHANNEL(index, tx)};      \
+		SPI_CONTEXT_CS_GPIOS_INITIALIZE(DT_DRV_INST(index), ctx).initialized = false,      \
+		SPI_DMA_CHANNEL(index, rx) SPI_DMA_CHANNEL(index, tx)};                            \
 	static const struct spi_bee_config spi_bee_config_##index = {                              \
 		.reg = DT_INST_REG_ADDR(index),                                                    \
 		.clkid = DT_INST_CLOCKS_CELL(index, id),                                           \
 		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(index),                                     \
 		.is_slave = DT_INST_PROP_OR(index, is_slave, false),                               \
 		IF_ENABLED(CONFIG_SPI_BEE_INTERRUPT,                                               \
-			   (.irq_configure = spi_bee_irq_configure_##index))};                     \
-	PM_DEVICE_DT_INST_DEFINE(index, spi_bee_pm_action);                                        \
-	DEVICE_DT_INST_DEFINE(index, &spi_bee_init, PM_DEVICE_DT_INST_GET(index),                  \
-			      &spi_bee_data_##index, &spi_bee_config_##index, POST_KERNEL,         \
-			      CONFIG_SPI_INIT_PRIORITY, &spi_bee_driver_api);
+			   (.irq_configure = spi_bee_irq_config_##index))}; \
+	BEE_SPI_PM_DEFINE(index)                                                                   \
+	DEVICE_DT_INST_DEFINE(index, &spi_bee_init, BEE_SPI_PM_GET(index), &spi_bee_data_##index,  \
+			      &spi_bee_config_##index, POST_KERNEL, CONFIG_SPI_INIT_PRIORITY,      \
+			      &spi_bee_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(BEE_SPI_INIT)
-
-BUILD_ASSERT(DT_NODE_HAS_STATUS(DT_NODELABEL(spi0), okay) +
-			     DT_NODE_HAS_STATUS(DT_NODELABEL(spi0_slave), okay) <
-		     2,
-	     "Only one spi0 node(spi0 or spi0_slave) is supported");
-
-#ifdef CONFIG_SPI_SLAVE
-#define SPI_SLAVE_DEFINED 1
-#else
-#define SPI_SLAVE_DEFINED 0
-#endif
-BUILD_ASSERT(!(DT_NODE_HAS_STATUS(DT_NODELABEL(spi0_slave), okay) && !SPI_SLAVE_DEFINED),
-	     "CONFIG_SPI_SLAVE should be enabled if spi0_slave node is used");

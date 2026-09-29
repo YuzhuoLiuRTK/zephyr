@@ -263,10 +263,10 @@ struct spi_cs_control {
  * @param delay_ The @p delay field to set in the @p spi_cs_control
  * @return a pointer to the @p spi_cs_control structure
  */
-#define SPI_CS_CONTROL_INIT(node_id, delay_)			  \
+#define SPI_CS_CONTROL_INIT(node_id, ...)			  \
 	{							  \
 		.gpio = SPI_CS_GPIOS_DT_SPEC_GET(node_id),	  \
-		.delay = (delay_),				  \
+		.delay = GET_ARG_N(1, __VA_ARGS__ __VA_OPT__(,) 0),	  \
 	}
 
 /**
@@ -344,7 +344,7 @@ struct spi_config {
  * @param delay_ the desired @p delay field in the struct spi_config's
  *               spi_cs_control, if there is one
  */
-#define SPI_CONFIG_DT(node_id, operation_, delay_)			\
+#define SPI_CONFIG_DT(node_id, operation_, ...)				\
 	{								\
 		.frequency = DT_PROP(node_id, spi_max_frequency),	\
 		.operation = (operation_) |				\
@@ -354,7 +354,7 @@ struct spi_config {
 			COND_CODE_1(DT_PROP(node_id, spi_cpha), SPI_MODE_CPHA, (0)) |	\
 			COND_CODE_1(DT_PROP(node_id, spi_hold_cs), SPI_HOLD_ON_CS, (0)),	\
 		.slave = DT_REG_ADDR(node_id),				\
-		.cs = SPI_CS_CONTROL_INIT(node_id, delay_),		\
+		.cs = SPI_CS_CONTROL_INIT(node_id, __VA_ARGS__),	\
 	}
 
 /**
@@ -368,8 +368,8 @@ struct spi_config {
  * @param delay_ the desired @p delay field in the struct spi_config's
  *               spi_cs_control, if there is one
  */
-#define SPI_CONFIG_DT_INST(inst, operation_, delay_)	\
-	SPI_CONFIG_DT(DT_DRV_INST(inst), operation_, delay_)
+#define SPI_CONFIG_DT_INST(inst, operation_, ...)	\
+	SPI_CONFIG_DT(DT_DRV_INST(inst), operation_, __VA_ARGS__)
 
 /**
  * @brief Complete SPI DT information
@@ -398,10 +398,10 @@ struct spi_dt_spec {
  * @param delay_ the desired @p delay field in the struct spi_config's
  *               spi_cs_control, if there is one
  */
-#define SPI_DT_SPEC_GET(node_id, operation_, delay_)		     \
+#define SPI_DT_SPEC_GET(node_id, operation_, ...)		     \
 	{							     \
 		.bus = DEVICE_DT_GET(DT_BUS(node_id)),		     \
-		.config = SPI_CONFIG_DT(node_id, operation_, delay_) \
+		.config = SPI_CONFIG_DT(node_id, operation_, __VA_ARGS__) \
 	}
 
 /**
@@ -415,8 +415,8 @@ struct spi_dt_spec {
  * @param delay_ the desired @p delay field in the struct spi_config's
  *               spi_cs_control, if there is one
  */
-#define SPI_DT_SPEC_INST_GET(inst, operation_, delay_) \
-	SPI_DT_SPEC_GET(DT_DRV_INST(inst), operation_, delay_)
+#define SPI_DT_SPEC_INST_GET(inst, operation_, ...) \
+	SPI_DT_SPEC_GET(DT_DRV_INST(inst), operation_, __VA_ARGS__)
 
 /**
  * @brief SPI buffer structure

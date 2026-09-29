@@ -1,7 +1,13 @@
 /*
- * Copyright(c) 2025, Realtek Semiconductor Corporation.
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @file
+ * @brief Header file for custom sensor channels of Realtek Bee QDEC
+ * @ingroup qdec_bee_interface
  */
 
 #ifndef ZEPHYR_INCLUDE_DRIVERS_SENSOR_QDEC_BEE_H_
@@ -9,20 +15,29 @@
 
 #include <zephyr/drivers/sensor.h>
 
-enum sensor_attribute_qdec_bee {
-	SENSOR_ATTR_QDEC_PRIV_START = SENSOR_ATTR_PRIV_START,
-#if CONFIG_BEE_QDEC_X_AXIS_ENABLE
-	/** Angular rotation of x axis, in degrees */
-	SENSOR_ATTR_QDEC_X_ROTATION,
-#endif
-#if CONFIG_BEE_QDEC_Y_AXIS_ENABLE
-	/** Angular rotation of y axis, in degrees */
-	SENSOR_ATTR_QDEC_Y_ROTATION,
-#endif
-#if CONFIG_BEE_QDEC_Z_AXIS_ENABLE
-	/** Angular rotation of z axis, in degrees */
-	SENSOR_ATTR_QDEC_Z_ROTATION,
-#endif
+/**
+ * @brief Realtek Bee QDEC
+ * @defgroup qdec_bee_interface Realtek Bee QDEC
+ * @ingroup sensor_interface_ext
+ *
+ * Realtek Bee QDEC provides custom sensor channels for raw X/Y/Z axis counts.
+ * @{
+ */
+
+/**
+ * @brief Custom sensor channels for Realtek Bee QDEC
+ */
+enum sensor_channel_qdec_bee {
+	/** X-axis raw count */
+	SENSOR_CHAN_QDEC_X_COUNT = SENSOR_CHAN_PRIV_START,
+	/** Y-axis raw count */
+	SENSOR_CHAN_QDEC_Y_COUNT,
+	/** Z-axis raw count */
+	SENSOR_CHAN_QDEC_Z_COUNT,
 };
+
+/**
+ * @}
+ */
 
 #endif /* ZEPHYR_INCLUDE_DRIVERS_SENSOR_QDEC_BEE_H_ */

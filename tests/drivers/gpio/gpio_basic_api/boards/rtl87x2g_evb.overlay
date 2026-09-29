@@ -7,10 +7,8 @@
 #include <zephyr/dt-bindings/gpio/realtek-bee-gpio.h>
 
 &gpioa {
-	status = "okay";
-};
-
-&gpiob {
+	pinctrl-0 = <&gpioa_default>;
+	pinctrl-names = "default";
 	status = "okay";
 };
 
@@ -23,5 +21,14 @@
 
 	chosen {
 		zephyr,entropy = &trng;
+	};
+};
+
+&pinctrl {
+	gpioa_default: gpioa_default {
+		group1 {
+			psels = <BEE_PSEL(DWGPIO, P0_0, DIR_OUT, DRV_HIGH, PULL_UP)>,
+			<BEE_PSEL(DWGPIO, P0_1, DIR_IN, DRV_HIGH, PULL_UP)>;
+		};
 	};
 };

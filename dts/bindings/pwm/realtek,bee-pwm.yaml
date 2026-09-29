@@ -1,14 +1,16 @@
-# Copyright(c) 2026, Realtek Semiconductor Corporation.
+# Copyright (c) 2026, Realtek Semiconductor Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-description: |
-  Bee PWM.
+description: Realtek Bee Timer implemented as PWM
 
 compatible: "realtek,bee-pwm"
 
 include: [base.yaml, pwm-controller.yaml, pinctrl-device.yaml]
 
 properties:
+  clocks:
+    type: phandle-array
+
   pinctrl-0:
     required: true
 

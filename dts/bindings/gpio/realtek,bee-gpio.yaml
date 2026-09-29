@@ -20,7 +20,7 @@ description: |
 
 compatible: "realtek,bee-gpio"
 
-include: [gpio-controller.yaml, base.yaml]
+include: [gpio-controller.yaml, base.yaml, pinctrl-device.yaml]
 
 properties:
   reg:
@@ -44,6 +44,12 @@ properties:
       And GPIO port GPIOB has:
 
         port = <1>;
+
+  pinctrl-0:
+    required: true
+
+  pinctrl-names:
+    required: true
 
 gpio-cells:
   - pin

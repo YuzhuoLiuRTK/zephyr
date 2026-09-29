@@ -1193,6 +1193,15 @@ DT_FOREACH_STATUS_OKAY_NODE(Z_MAYBE_DEVICE_DECLARE_INTERNAL)
 
 /** @endcond */
 
+/* Backport of the Zephyr 4.x device API macros, so that the Realtek Bee
+ * drivers can be shared verbatim with the upstream tree.
+ */
+#define Z_DEVICE_API_TYPE(_class) _CONCAT(_class, _driver_api)
+
+#define DEVICE_API(_class, _name) const struct Z_DEVICE_API_TYPE(_class) _name
+
+#define DEVICE_API_GET(_class, _dev) ((const struct Z_DEVICE_API_TYPE(_class) *)_dev->api)
+
 #ifdef __cplusplus
 }
 #endif
