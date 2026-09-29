@@ -4,6 +4,22 @@
 config ZEPHYR_HAL_REALTEK_MODULE
 	bool
 
+config REALTEK_BEE_HAS_PCK600
+	bool
+	help
+	  Selected by SoCs whose HAL drives the Arm PCK-600 power control kit.
+
+	  With PCK-600 every peripheral owns its power and clock control and
+	  raises its own active request, its registers are retained across a
+	  low power state and its pads switch to their sleep configuration in
+	  hardware. Devices therefore only have to release their active
+	  request to let the system enter a low power state.
+
+	  Without PCK-600 the platform power manager takes the whole SoC down
+	  at once, peripheral registers lose their content and pads have to be
+	  switched by software, so devices have to save and restore their
+	  context around a low power state.
+
 config USE_HAL_REALTEK_ADC
 	bool
 	help
@@ -123,3 +139,72 @@ config USE_HAL_REALTEK_PINMUX
 	bool
 	help
 	  Enable HAL REALTEK PINMUX driver
+
+# Aliases for the HAL symbol names the upstream Realtek Bee drivers select, so
+# that those drivers can be shared verbatim with the upstream tree.
+
+config HAL_REALTEK_BEE_ADC
+	bool
+	select USE_HAL_REALTEK_ADC
+
+config HAL_REALTEK_BEE_AON_QDEC
+	bool
+	select USE_HAL_REALTEK_AON_QDEC
+
+config HAL_REALTEK_BEE_CAN
+	bool
+	select USE_HAL_REALTEK_CAN
+
+config HAL_REALTEK_BEE_DMA
+	bool
+	select USE_HAL_REALTEK_DMA
+
+config HAL_REALTEK_BEE_ENHTIM
+	bool
+	select USE_HAL_REALTEK_ENHTIM
+
+config HAL_REALTEK_BEE_GPIO
+	bool
+	select USE_HAL_REALTEK_GPIO
+
+config HAL_REALTEK_BEE_I2C
+	bool
+	select USE_HAL_REALTEK_I2C
+
+config HAL_REALTEK_BEE_I2S
+	bool
+	select USE_HAL_REALTEK_I2S
+
+config HAL_REALTEK_BEE_IR
+	bool
+	select USE_HAL_REALTEK_IR
+
+config HAL_REALTEK_BEE_KEYSCAN
+	bool
+	select USE_HAL_REALTEK_KEYSCAN
+
+config HAL_REALTEK_BEE_LPQDEC
+	bool
+
+config HAL_REALTEK_BEE_PWM
+	bool
+
+config HAL_REALTEK_BEE_QDEC
+	bool
+	select USE_HAL_REALTEK_QDEC
+
+config HAL_REALTEK_BEE_RTC
+	bool
+	select USE_HAL_REALTEK_RTC
+
+config HAL_REALTEK_BEE_SPI
+	bool
+	select USE_HAL_REALTEK_SPI
+
+config HAL_REALTEK_BEE_TIM
+	bool
+	select USE_HAL_REALTEK_TIM
+
+config HAL_REALTEK_BEE_UART
+	bool
+	select USE_HAL_REALTEK_UART

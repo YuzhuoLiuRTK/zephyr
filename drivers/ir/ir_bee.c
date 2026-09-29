@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2025, Realtek Semiconductor Corporation.
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,10 +19,14 @@
 #include <zephyr/drivers/clock_control/bee_clock_control.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/irq.h>
-#include <zephyr/pm/device.h>
-#include <zephyr/pm/policy.h>
 
+#if defined(CONFIG_SOC_SERIES_RTL8752H)
 #include <rtl876x_ir.h>
+#elif defined(CONFIG_SOC_SERIES_RTL87X2G) || defined(CONFIG_SOC_SERIES_RTL87X2J)
+#include <rtl_ir.h>
+#else
+#error "Unsupported Realtek Bee SoC series for IR"
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(ir_bee, CONFIG_IR_LOG_LEVEL);
@@ -33,10 +37,65 @@ LOG_MODULE_REGISTER(ir_bee, CONFIG_IR_LOG_LEVEL);
 #define IR_HAS_TX_DMA DT_DMAS_HAS_NAME(DT_NODELABEL(ir), tx)
 #define IR_HAS_RX_DMA DT_DMAS_HAS_NAME(DT_NODELABEL(ir), rx)
 
-#ifdef CONFIG_PM_DEVICE
+#if defined(CONFIG_SOC_SERIES_RTL8752H)
+#define BEE_IR_TX_DMA_EN       IR_TxDmaEn
+#define BEE_IR_RX_DMA_EN       IR_RxDmaEn
+#define BEE_IR_RX_FILTER_200NS IR_RX_FILTER_TIME_200ns
+#define BEE_IR_RX_CNT_HIGH     IR_RX_Count_High_Level
+#define BEE_IR_RX_CNT_LOW      IR_RX_Count_Low_Level
+#define BEE_IR_TX_FIFO_REG(ir) ((ir)->TX_FIFO)
+#define BEE_IR_RX_FIFO_REG(ir) ((ir)->RX_FIFO)
+#define BEE_IR_HAS_TX_FINISH   1
+#elif defined(CONFIG_SOC_SERIES_RTL87X2G)
+#define BEE_IR_TX_DMA_EN       IR_TxDmaEn
+#define BEE_IR_RX_DMA_EN       IR_RxDmaEn
+#define BEE_IR_RX_FILTER_200NS IR_RX_FILTER_TIME_200ns
+#define BEE_IR_RX_CNT_HIGH     IR_RX_Count_High_Level
+#define BEE_IR_RX_CNT_LOW      IR_RX_Count_Low_Level
+#define BEE_IR_TX_FIFO_REG(ir) ((ir)->IR_TX_FIFO)
+#define BEE_IR_RX_FIFO_REG(ir) ((ir)->IR_RX_FIFO)
+#define BEE_IR_HAS_TX_FINISH   IR_SUPPORT_TX_FINISH_INTERRUPT
+#elif defined(CONFIG_SOC_SERIES_RTL87X2J)
+#define BEE_IR_TX_DMA_EN       IR_TxDMAEn
+#define BEE_IR_RX_DMA_EN       IR_RxDMAEn
+#define BEE_IR_RX_FILTER_200NS IR_RX_FILTER_TIME_200NS
+#define BEE_IR_RX_CNT_HIGH     IR_RX_COUNT_HIGH_LEVEL
+#define BEE_IR_RX_CNT_LOW      IR_RX_COUNT_LOW_LEVEL
+#define BEE_IR_TX_FIFO_REG(ir) ((ir)->IR_TX_FIFO)
+#define BEE_IR_RX_FIFO_REG(ir) ((ir)->IR_RX_FIFO)
+#define BEE_IR_HAS_TX_FINISH   IR_SUPPORT_TX_FINISH_INTERRUPT
+#endif
+
+#if BEE_IR_HAS_TX_FINISH
+#define BEE_IR_TXDONE_INT      IR_INT_TX_FINISH
+#define BEE_IR_TXDONE_INT_CLR  IR_INT_TX_FINISH_CLR
+#else
+#define BEE_IR_TXDONE_INT      IR_INT_TF_EMPTY
+#define BEE_IR_TXDONE_INT_CLR  IR_INT_TF_EMPTY_CLR
+#endif
+
+#if defined(CONFIG_PM_DEVICE) && !defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+#define BEE_IR_PM_STORE 1
+#endif
+
+#if defined(BEE_IR_PM_STORE)
+#include <zephyr/pm/device.h>
+
+#if defined(CONFIG_SOC_SERIES_RTL87X2G)
+typedef IRStoreReg_Typedef ir_bee_store_reg_t;
+#elif defined(CONFIG_SOC_SERIES_RTL8752H)
+typedef IRStoreReg_TypeDef ir_bee_store_reg_t;
+#endif
+
 extern void IR_DLPSEnter(void *PeriReg, void *StoreBuf);
 extern void IR_DLPSExit(void *PeriReg, void *StoreBuf);
-#endif
+
+#define BEE_IR_STORE_ALL(reg, buf)   IR_DLPSEnter(reg, buf)
+#define BEE_IR_RESTORE_ALL(reg, buf) IR_DLPSExit(reg, buf)
+#else
+#define BEE_IR_STORE_ALL(reg, buf)
+#define BEE_IR_RESTORE_ALL(reg, buf)
+#endif /* BEE_IR_PM_STORE */
 
 #if (IR_HAS_TX_DMA)
 struct tx_stream {
@@ -89,8 +148,8 @@ struct ir_bee_data {
 #if IR_HAS_RX_DMA
 	struct rx_stream dma_rx;
 #endif
-#ifdef CONFIG_PM_DEVICE
-	IRStoreReg_Typedef store_buf;
+#if defined(BEE_IR_PM_STORE)
+	ir_bee_store_reg_t store_buf;
 #endif
 };
 
@@ -209,18 +268,16 @@ static int ir_bee_tx_init(const struct device *dev)
 	IR_InitStruct.IR_Mode = IR_MODE_TX;
 	IR_InitStruct.IR_TxInverse = IR_TX_DATA_NORMAL;
 #if IR_HAS_TX_DMA
-	IR_InitStruct.IR_TxDmaEn = ENABLE;
+	IR_InitStruct.BEE_IR_TX_DMA_EN = ENABLE;
 	IR_InitStruct.IR_TxWaterLevel = IR_TX_FIFO_SIZE - data->dma_tx.dma_cfg.dest_burst_length;
 #else
-	IR_InitStruct.IR_TxDmaEn = DISABLE;
+	IR_InitStruct.BEE_IR_TX_DMA_EN = DISABLE;
 #endif
 	IR_Init(&IR_InitStruct);
 
 	IR_Cmd(IR_MODE_TX, DISABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	IR_DLPSEnter(ir, &data->store_buf);
-#endif
+	BEE_IR_STORE_ALL(ir, &data->store_buf);
 
 	return 0;
 }
@@ -234,10 +291,12 @@ static int ir_bee_tx_enable(const struct device *dev, ir_callback_t callback, vo
 		return -EINVAL;
 	}
 
+#if defined(CONFIG_SOC_SERIES_RTL8752H)
 	err = ir_bee_tx_init(dev);
 	if (err < 0) {
 		return err;
 	}
+#endif
 
 	data->cb = callback;
 	data->cb_usr_data = user_data;
@@ -251,7 +310,7 @@ static int ir_bee_tx(const struct device *dev, const uint32_t *buf, size_t len)
 	struct ir_bee_data *data = dev->data;
 	int err;
 
-	LOG_DBG("[%s] buf0x%x len%d line%d", __func__, buf, len, __LINE__);
+	LOG_DBG("[%s] buf%p len%zu line%d", __func__, (void *)buf, len, __LINE__);
 
 	if (buf == NULL) {
 		return -EINVAL;
@@ -265,8 +324,12 @@ static int ir_bee_tx(const struct device *dev, const uint32_t *buf, size_t len)
 #if IR_HAS_TX_DMA
 	data->tx_len = len;
 	data->dma_tx.blk_cfg.source_address = (uint32_t)(buf);
+#if defined(CONFIG_SOC_SERIES_RTL8752H)
 	data->dma_tx.blk_cfg.block_size = (len + 1) * data->dma_tx.dma_cfg.source_data_size;
-
+#else
+	data->dma_tx.blk_cfg.block_size = len * data->dma_tx.dma_cfg.source_data_size;
+#endif
+	dma_stop(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
 	if (dma_config(data->dma_tx.dma_dev, data->dma_tx.dma_channel, &data->dma_tx.dma_cfg)) {
 		LOG_ERR("dma tx config error!");
 		return -EINVAL;
@@ -274,16 +337,16 @@ static int ir_bee_tx(const struct device *dev, const uint32_t *buf, size_t len)
 
 	IR_Cmd(IR_MODE_TX, ENABLE);
 
-	IR_MaskINTConfig(IR_INT_TX_FINISH, DISABLE);
-	IR_INTConfig(IR_INT_TX_FINISH, ENABLE);
+	IR_MaskINTConfig(BEE_IR_TXDONE_INT, DISABLE);
+	IR_INTConfig(BEE_IR_TXDONE_INT, ENABLE);
 
 	if (dma_start(data->dma_tx.dma_dev, data->dma_tx.dma_channel)) {
 		LOG_ERR("dma tx start error!");
 		return -EFAULT;
 	}
 #else
-	IR_MaskINTConfig(IR_INT_TX_FINISH, DISABLE);
-	IR_INTConfig(IR_INT_TX_FINISH, ENABLE);
+	IR_MaskINTConfig(BEE_IR_TXDONE_INT, DISABLE);
+	IR_INTConfig(BEE_IR_TXDONE_INT, ENABLE);
 
 	if (len > IR_TX_FIFO_SIZE) {
 		IR_SendBuf(buf, IR_TX_FIFO_SIZE, ENABLE);
@@ -334,15 +397,15 @@ static int ir_bee_rx_init(const struct device *dev)
 #endif
 	IR_InitStruct.IR_RxFIFOFullCtrl = IR_RX_FIFO_FULL_DISCARD_NEWEST;
 	IR_InitStruct.IR_RxTriggerMode = data->falling_trig ? IR_RX_FALL_EDGE : IR_RX_RISING_EDGE;
-	IR_InitStruct.IR_RxFilterTime = IR_RX_FILTER_TIME_200ns;
+	IR_InitStruct.IR_RxFilterTime = BEE_IR_RX_FILTER_200NS;
 	IR_InitStruct.IR_RxCntThrType =
-		data->falling_trig ? IR_RX_Count_High_Level : IR_RX_Count_Low_Level;
+		data->falling_trig ? BEE_IR_RX_CNT_HIGH : BEE_IR_RX_CNT_LOW;
 	IR_InitStruct.IR_RxCntThr = data->rx_idle_cnt;
 #if IR_HAS_RX_DMA
-	IR_InitStruct.IR_RxDmaEn = ENABLE;
+	IR_InitStruct.BEE_IR_RX_DMA_EN = ENABLE;
 	IR_InitStruct.IR_RxWaterLevel = data->dma_rx.dma_cfg.source_burst_length;
 #else
-	IR_InitStruct.IR_RxDmaEn = DISABLE;
+	IR_InitStruct.BEE_IR_RX_DMA_EN = DISABLE;
 #endif
 
 	IR_Init(&IR_InitStruct);
@@ -350,9 +413,7 @@ static int ir_bee_rx_init(const struct device *dev)
 	IR_ClearRxFIFO();
 	IR_Cmd(IR_MODE_RX, ENABLE);
 
-#ifdef CONFIG_PM_DEVICE
-	IR_DLPSEnter(ir, &data->store_buf);
-#endif
+	BEE_IR_STORE_ALL(ir, &data->store_buf);
 
 	return 0;
 }
@@ -492,22 +553,13 @@ static void ir_bee_isr(const struct device *dev)
 
 	memset(&evt, 0, sizeof(evt));
 
-	if (IR_GetINTStatus(IR_INT_TF_EMPTY)) {
-		IR_MaskINTConfig(IR_INT_TF_EMPTY, ENABLE);
-		IR_INTConfig(IR_INT_TF_EMPTY, DISABLE);
-		IR_ClearINTPendingBit(IR_INT_TF_EMPTY_CLR);
-		data->tx_len = 0;
-		evt.type = IR_TX_COMPLETED;
-		evt.data.tx.len = tx_len;
-		if (data->cb) {
-			data->cb(dev, &evt, data->cb_usr_data);
-		}
-	}
-
-	if (IR_GetINTStatus(IR_INT_TX_FINISH)) {
-		IR_MaskINTConfig(IR_INT_TX_FINISH, ENABLE);
-		IR_INTConfig(IR_INT_TX_FINISH, DISABLE);
-		IR_ClearINTPendingBit(IR_INT_TX_FINISH_CLR);
+	if (IR_GetINTStatus(BEE_IR_TXDONE_INT)) {
+		IR_MaskINTConfig(BEE_IR_TXDONE_INT, ENABLE);
+		IR_INTConfig(BEE_IR_TXDONE_INT, DISABLE);
+		IR_ClearINTPendingBit(BEE_IR_TXDONE_INT_CLR);
+#if defined(IR_SUPPORT_TX_FINISH_INTERRUPT) && IR_SUPPORT_TX_FINISH_INTERRUPT
+		IR_Cmd(IR_MODE_TX, DISABLE);
+#endif
 		data->tx_len = 0;
 		evt.type = IR_TX_COMPLETED;
 		evt.data.tx.len = tx_len;
@@ -611,68 +663,54 @@ static void ir_bee_isr(const struct device *dev)
 	}
 }
 
-#ifdef CONFIG_PM_DEVICE
-static int ir_bee_pm_action(const struct device *dev, enum pm_device_action action)
+#if IR_HAS_TX_DMA || IR_HAS_RX_DMA
+/*
+ * Claim the devicetree-assigned channel through the DMA controller's allocation
+ * bitmap so a dma_request_channel(dev, NULL) caller on the same controller can
+ * never be handed it. A BIT(channel) filter forces exactly the DT channel and
+ * fails loudly if it is already in use.
+ */
+static int ir_bee_claim_dma_channel(const struct device *dma_dev, uint32_t channel)
 {
-	const struct ir_bee_config *config = dev->config;
-	struct ir_bee_data *data = dev->data;
-	IR_TypeDef *ir = config->ir;
-	int err;
+	uint32_t filter = BIT(channel);
+	int ret = dma_request_channel(dma_dev, &filter);
 
-	switch (action) {
-	case PM_DEVICE_ACTION_SUSPEND:
-		/* Move pins to sleep state */
-		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
-		if ((err < 0) && (err != -ENOENT)) {
-			return err;
-		}
-		break;
-	case PM_DEVICE_ACTION_RESUME:
-		if (data->is_tx_mode) {
-			err = ir_bee_config_tx_pin(dev);
-
-		} else {
-			err = ir_bee_config_rx_pin(dev);
-		}
-
-		if (err < 0) {
-			return err;
-		}
-
-		IR_DLPSExit(ir, &data->store_buf);
-
-		break;
-	default:
-		return -ENOTSUP;
-	}
-
-	return 0;
+	return ret < 0 ? ret : 0;
 }
-#endif /* CONFIG_PM_DEVICE */
+#endif
 
-static const struct ir_driver_api ir_bee_driver_api = {
-	.set_freq = ir_bee_set_freq,
-	.tx_enable = ir_bee_tx_enable,
-	.tx = ir_bee_tx,
-	.rx_enable = ir_bee_rx_enable,
-	.rx_disable = ir_bee_rx_disable,
-};
+#if IR_HAS_RX_DMA
+static bool ir_rx_shares_tx_channel(const struct ir_bee_data *data)
+{
+#if IR_HAS_TX_DMA
+	return data->dma_rx.dma_dev == data->dma_tx.dma_dev &&
+	       data->dma_rx.dma_channel == data->dma_tx.dma_channel;
+#else
+	ARG_UNUSED(data);
+	return false;
+#endif
+}
+#endif
 
 static int ir_bee_init(const struct device *dev)
 {
 	const struct ir_bee_config *config = dev->config;
 	struct ir_bee_data *data = dev->data;
 	IR_TypeDef *ir = config->ir;
+	int ret = 0;
 
 	config->irq_config_func(dev);
 
 #if IR_HAS_TX_DMA
-	atomic_set_bit(((struct dma_context *)data->dma_tx.dma_dev->data)->atomic,
-		       data->dma_tx.dma_channel);
+	ret = ir_bee_claim_dma_channel(data->dma_tx.dma_dev, data->dma_tx.dma_channel);
+	if (ret < 0) {
+		LOG_ERR("IR TX DMA channel %u already in use", data->dma_tx.dma_channel);
+		return ret;
+	}
 
 	memset(&data->dma_tx.blk_cfg, 0, sizeof(data->dma_tx.blk_cfg));
 
-	data->dma_tx.blk_cfg.dest_address = (uint32_t)(&(ir->TX_FIFO));
+	data->dma_tx.blk_cfg.dest_address = (uint32_t)(&BEE_IR_TX_FIFO_REG(ir));
 	data->dma_tx.blk_cfg.source_address = 0; /* not ready */
 	data->dma_tx.blk_cfg.source_addr_adj = data->dma_tx.src_addr_increment;
 	data->dma_tx.blk_cfg.dest_addr_adj = data->dma_tx.dst_addr_increment;
@@ -683,19 +721,31 @@ static int ir_bee_init(const struct device *dev)
 #endif
 
 #if IR_HAS_RX_DMA
-	atomic_set_bit(((struct dma_context *)data->dma_rx.dma_dev->data)->atomic,
-		       data->dma_rx.dma_channel);
+	/*
+	 * Claim the RX channel too. IR is half-duplex and its board overlays
+	 * commonly place TX and RX on one shared DMA channel; that channel is
+	 * already reserved by the TX claim above, so only request RX when it is a
+	 * distinct channel to avoid a spurious -EINVAL from the double claim.
+	 */
+	if (!ir_rx_shares_tx_channel(data)) {
+		ret = ir_bee_claim_dma_channel(data->dma_rx.dma_dev,
+					       data->dma_rx.dma_channel);
+		if (ret < 0) {
+			LOG_ERR("IR RX DMA channel %u already in use", data->dma_rx.dma_channel);
+			return ret;
+		}
+	}
 
 	memset(&data->dma_rx.blk_cfg[0], 0, sizeof(data->dma_rx.blk_cfg[0]));
 	memset(&data->dma_rx.blk_cfg[1], 0, sizeof(data->dma_rx.blk_cfg[1]));
 
 	data->dma_rx.blk_cfg[0].dest_address = 0; /* not ready */
-	data->dma_rx.blk_cfg[0].source_address = (uint32_t)(&(ir->RX_FIFO));
+	data->dma_rx.blk_cfg[0].source_address = (uint32_t)(&BEE_IR_RX_FIFO_REG(ir));
 	data->dma_rx.blk_cfg[0].source_addr_adj = data->dma_rx.src_addr_increment;
 	data->dma_rx.blk_cfg[0].dest_addr_adj = data->dma_rx.dst_addr_increment;
 	data->dma_rx.blk_cfg[0].next_block = &(data->dma_rx.blk_cfg[1]);
 	data->dma_rx.blk_cfg[1].dest_address = 0; /* not ready */
-	data->dma_rx.blk_cfg[1].source_address = (uint32_t)(&(ir->RX_FIFO));
+	data->dma_rx.blk_cfg[1].source_address = (uint32_t)(&BEE_IR_RX_FIFO_REG(ir));
 	data->dma_rx.blk_cfg[1].source_addr_adj = data->dma_rx.src_addr_increment;
 	data->dma_rx.blk_cfg[1].dest_addr_adj = data->dma_rx.dst_addr_increment;
 	data->dma_rx.blk_cfg[1].next_block = NULL;
@@ -706,8 +756,65 @@ static int ir_bee_init(const struct device *dev)
 	data->dma_rx.dma_cfg.user_data = (void *)dev;
 #endif
 
+#if defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+	int err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+
+	if ((err < 0) && (err != -ENOENT)) {
+		return err;
+	}
+#endif
+
+	return ret;
+}
+
+#if defined(BEE_IR_PM_STORE)
+static int ir_bee_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	const struct ir_bee_config *config = dev->config;
+	struct ir_bee_data *data = dev->data;
+	int err;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_SUSPEND:
+		(void)clock_control_off(BEE_CLOCK_CONTROLLER,
+					(clock_control_subsys_t)&config->clkid);
+
+		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+		if ((err < 0) && (err != -ENOENT)) {
+			return err;
+		}
+		break;
+	case PM_DEVICE_ACTION_RESUME:
+		if (data->is_tx_mode) {
+			err = ir_bee_config_tx_pin(dev);
+		} else {
+			err = ir_bee_config_rx_pin(dev);
+		}
+
+		if (err < 0) {
+			return err;
+		}
+
+		(void)clock_control_on(BEE_CLOCK_CONTROLLER,
+				       (clock_control_subsys_t)&config->clkid);
+
+		BEE_IR_RESTORE_ALL(config->ir, &data->store_buf);
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
 	return 0;
 }
+#endif /* BEE_IR_PM_STORE */
+
+static DEVICE_API(ir, ir_bee_driver_api) = {
+	.set_freq = ir_bee_set_freq,
+	.tx_enable = ir_bee_tx_enable,
+	.tx = ir_bee_tx,
+	.rx_enable = ir_bee_rx_enable,
+	.rx_disable = ir_bee_rx_disable,
+};
 
 #define BEE_IR_IRQ_HANDLER(index)                                                                  \
 	static void ir_bee_irq_config_func_##index(const struct device *dev)                       \
@@ -758,6 +865,14 @@ static int ir_bee_init(const struct device *dev)
 #define IR_DMA_INIT(index)
 #endif
 
+#if defined(BEE_IR_PM_STORE)
+#define BEE_IR_PM_DEFINE(index) PM_DEVICE_DT_INST_DEFINE(index, ir_bee_pm_action);
+#define BEE_IR_PM_GET(index)    PM_DEVICE_DT_INST_GET(index)
+#else
+#define BEE_IR_PM_DEFINE(index)
+#define BEE_IR_PM_GET(index) NULL
+#endif
+
 #define BEE_IR_INIT(index)                                                                         \
 	BEE_IR_IRQ_HANDLER(index)                                                                  \
 	PINCTRL_DT_INST_DEFINE(index);                                                             \
@@ -772,8 +887,8 @@ static int ir_bee_init(const struct device *dev)
 		.src_clk = 40000000,                                                               \
 		.falling_trig = DT_INST_PROP_OR(index, rx_falling_edge_trig, 0),                   \
 		IR_DMA_INIT(index)};                                                               \
-	PM_DEVICE_DT_INST_DEFINE(index, ir_bee_pm_action);                                         \
-	DEVICE_DT_INST_DEFINE(index, &ir_bee_init, PM_DEVICE_DT_INST_GET(index),                   \
+	BEE_IR_PM_DEFINE(index)                                                                    \
+	DEVICE_DT_INST_DEFINE(index, &ir_bee_init, BEE_IR_PM_GET(index),                           \
 			      &ir_bee_data_##index, &ir_bee_cfg_##index, POST_KERNEL,              \
 			      CONFIG_IR_INIT_PRIORITY, &ir_bee_driver_api);
 
