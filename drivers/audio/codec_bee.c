@@ -445,7 +445,6 @@ static void codec_bee_start_output(const struct device *dev)
 
 static void codec_bee_stop_output(const struct device *dev)
 {
-	const struct codec_bee_config *config = dev->config;
 	__maybe_unused struct codec_bee_data *data = dev->data;
 
 	CODEC_DeInit(CODEC);
@@ -524,7 +523,7 @@ static const struct audio_codec_api codec_bee_driver_api = {
 static int codec_bee_init(const struct device *dev)
 {
 	const struct codec_bee_config *config = dev->config;
-	struct codec_bee_data *data = dev->data;
+	__maybe_unused struct codec_bee_data *data = dev->data;
 
 	if (!device_is_ready(config->bus)) {
 		return -ENODEV;

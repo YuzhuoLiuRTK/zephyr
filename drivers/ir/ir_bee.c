@@ -281,14 +281,14 @@ static int ir_bee_tx_init(const struct device *dev)
 static int ir_bee_tx_enable(const struct device *dev, ir_callback_t callback, void *user_data)
 {
 	struct ir_bee_data *data = dev->data;
-	int err;
 
 	if (callback == NULL) {
 		return -EINVAL;
 	}
 
 #if defined(CONFIG_SOC_SERIES_RTL8752H)
-	err = ir_bee_tx_init(dev);
+	int err = ir_bee_tx_init(dev);
+
 	if (err < 0) {
 		return err;
 	}
