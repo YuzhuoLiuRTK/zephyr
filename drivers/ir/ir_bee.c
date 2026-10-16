@@ -74,6 +74,25 @@ LOG_MODULE_REGISTER(ir_bee, CONFIG_IR_LOG_LEVEL);
 #define BEE_IR_TXDONE_INT_CLR  IR_INT_TF_EMPTY_CLR
 #endif
 
+#if defined(CONFIG_PM_DEVICE) && !defined(CONFIG_REALTEK_BEE_HAS_PCK600)
+#define BEE_IR_PM_STORE 1
+#endif
+
+#if defined(BEE_IR_PM_STORE)
+#include <zephyr/pm/device.h>
+
+typedef IRStoreReg_TypeDef ir_bee_store_reg_t;
+
+extern void IR_DLPSEnter(void *PeriReg, void *StoreBuf);
+extern void IR_DLPSExit(void *PeriReg, void *StoreBuf);
+
+#define BEE_IR_STORE_ALL(reg, buf)   IR_DLPSEnter(reg, buf)
+#define BEE_IR_RESTORE_ALL(reg, buf) IR_DLPSExit(reg, buf)
+#else
+#define BEE_IR_STORE_ALL(reg, buf)
+#define BEE_IR_RESTORE_ALL(reg, buf)
+#endif /* BEE_IR_PM_STORE */
+
 #if (IR_HAS_TX_DMA)
 struct tx_stream {
 	const struct device *dma_dev;
@@ -124,6 +143,9 @@ struct ir_bee_data {
 #endif
 #if IR_HAS_RX_DMA
 	struct rx_stream dma_rx;
+#endif
+#if defined(BEE_IR_PM_STORE)
+	ir_bee_store_reg_t store_buf;
 #endif
 };
 
@@ -250,6 +272,8 @@ static int ir_bee_tx_init(const struct device *dev)
 	IR_Init(&IR_InitStruct);
 
 	IR_Cmd(IR_MODE_TX, DISABLE);
+
+	BEE_IR_STORE_ALL(ir, &data->store_buf);
 
 	return 0;
 }
@@ -384,6 +408,8 @@ static int ir_bee_rx_init(const struct device *dev)
 
 	IR_ClearRxFIFO();
 	IR_Cmd(IR_MODE_RX, ENABLE);
+
+	BEE_IR_STORE_ALL(ir, &data->store_buf);
 
 	return 0;
 }
@@ -737,6 +763,47 @@ static int ir_bee_init(const struct device *dev)
 	return ret;
 }
 
+#if defined(BEE_IR_PM_STORE)
+static int ir_bee_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	const struct ir_bee_config *config = dev->config;
+	struct ir_bee_data *data = dev->data;
+	int err;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_SUSPEND:
+		(void)clock_control_off(BEE_CLOCK_CONTROLLER,
+					(clock_control_subsys_t)&config->clkid);
+
+		err = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+		if ((err < 0) && (err != -ENOENT)) {
+			return err;
+		}
+		break;
+	case PM_DEVICE_ACTION_RESUME:
+		if (data->is_tx_mode) {
+			err = ir_bee_config_tx_pin(dev);
+		} else {
+			err = ir_bee_config_rx_pin(dev);
+		}
+
+		if (err < 0) {
+			return err;
+		}
+
+		(void)clock_control_on(BEE_CLOCK_CONTROLLER,
+				       (clock_control_subsys_t)&config->clkid);
+
+		BEE_IR_RESTORE_ALL(config->ir, &data->store_buf);
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+#endif /* BEE_IR_PM_STORE */
+
 static DEVICE_API(ir, ir_bee_driver_api) = {
 	.set_freq = ir_bee_set_freq,
 	.tx_enable = ir_bee_tx_enable,
@@ -794,6 +861,14 @@ static DEVICE_API(ir, ir_bee_driver_api) = {
 #define IR_DMA_INIT(index)
 #endif
 
+#if defined(BEE_IR_PM_STORE)
+#define BEE_IR_PM_DEFINE(index) PM_DEVICE_DT_INST_DEFINE(index, ir_bee_pm_action);
+#define BEE_IR_PM_GET(index)    PM_DEVICE_DT_INST_GET(index)
+#else
+#define BEE_IR_PM_DEFINE(index)
+#define BEE_IR_PM_GET(index) NULL
+#endif
+
 #define BEE_IR_INIT(index)                                                                         \
 	BEE_IR_IRQ_HANDLER(index)                                                                  \
 	PINCTRL_DT_INST_DEFINE(index);                                                             \
@@ -808,7 +883,8 @@ static DEVICE_API(ir, ir_bee_driver_api) = {
 		.src_clk = 40000000,                                                               \
 		.falling_trig = DT_INST_PROP_OR(index, rx_falling_edge_trig, 0),                   \
 		IR_DMA_INIT(index)};                                                               \
-	DEVICE_DT_INST_DEFINE(index, &ir_bee_init, NULL,                   \
+	BEE_IR_PM_DEFINE(index)                                                                    \
+	DEVICE_DT_INST_DEFINE(index, &ir_bee_init, BEE_IR_PM_GET(index),                           \
 			      &ir_bee_data_##index, &ir_bee_cfg_##index, POST_KERNEL,              \
 			      CONFIG_IR_INIT_PRIORITY, &ir_bee_driver_api);
 
